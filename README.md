@@ -23,6 +23,7 @@
 </div>
 
 ## 💖 赞助商 (Sponsors)
+
 <div align="center">
   <a href="https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis" target="_blank">
     <img src="./sources/serpapi_banner_zh.png" alt="轻松抓取搜索引擎上的实时金融新闻数据 - SerpApi" height="160">
@@ -30,34 +31,35 @@
 </div>
 <br>
 
-
 ## ✨ 功能特性
 
-| 模块 | 功能 | 说明 |
-|------|------|------|
-| AI | 决策仪表盘 | 一句话核心结论 + 评分 + 买卖点位 + 风险警报 + 操作检查清单 |
-| 分析 | 多维度分析 | 技术面、实时行情、筹码分布、新闻舆情、公告、资金流与基本面聚合 |
-| 市场 | 全球市场 | 支持 A股、港股、美股、美股指数及常见 ETF |
-| 策略 | 市场策略系统 | 内置 A股复盘、美股 Regime、均线、缠论、波浪、情绪周期等策略能力 |
-| 复盘 | 大盘复盘 | 每日市场概览、指数表现、涨跌统计与板块强弱（支持 cn / hk / us / both） |
-| Web | 双主题工作台 | 支持手动分析、配置管理、任务进度、历史报告、回测、持仓管理 |
-| 导入 | 智能导入与补全 | 支持图片、CSV/Excel、剪贴板导入，自选股输入支持代码/名称/拼音/别名补全 |
-| 历史 | 报告管理 | 支持历史报告查看、完整 Markdown 报告、重新分析与批量管理 |
-| 回测 | AI 回测验证 | 对历史分析进行事后验证，查看方向准确率和模拟收益 |
-| Agent 问股 | 策略对话 | 多轮策略问答，支持均线金叉/缠论/波浪等 11 种内置策略，Web/Bot/API 全链路 |
-| 推送 | 多渠道通知 | 支持企业微信、飞书、Telegram、Discord、Slack、邮件等主流渠道 |
-| 自动化 | 定时运行 | 支持 GitHub Actions、Docker、本地定时任务和 FastAPI 服务模式 |
+
+| 模块       | 功能           | 说明                                                                     |
+| ---------- | -------------- | ------------------------------------------------------------------------ |
+| AI         | 决策仪表盘     | 一句话核心结论 + 评分 + 买卖点位 + 风险警报 + 操作检查清单               |
+| 分析       | 多维度分析     | 技术面、实时行情、筹码分布、新闻舆情、公告、资金流与基本面聚合           |
+| 市场       | 全球市场       | 支持 A股、港股、美股、美股指数及常见 ETF                                 |
+| 策略       | 市场策略系统   | 内置 A股复盘、美股 Regime、均线、缠论、波浪、情绪周期等策略能力          |
+| 复盘       | 大盘复盘       | 每日市场概览、指数表现、涨跌统计与板块强弱（支持 cn / hk / us / both）   |
+| Web        | 双主题工作台   | 支持手动分析、配置管理、任务进度、历史报告、回测、持仓管理               |
+| 导入       | 智能导入与补全 | 支持图片、CSV/Excel、剪贴板导入，自选股输入支持代码/名称/拼音/别名补全   |
+| 历史       | 报告管理       | 支持历史报告查看、完整 Markdown 报告、重新分析与批量管理                 |
+| 回测       | AI 回测验证    | 对历史分析进行事后验证，查看方向准确率和模拟收益                         |
+| Agent 问股 | 策略对话       | 多轮策略问答，支持均线金叉/缠论/波浪等 11 种内置策略，Web/Bot/API 全链路 |
+| 推送       | 多渠道通知     | 支持企业微信、飞书、Telegram、Discord、Slack、邮件等主流渠道             |
+| 自动化     | 定时运行       | 支持 GitHub Actions、Docker、本地定时任务和 FastAPI 服务模式             |
 
 > 功能细节、字段契约、基本面 P0 超时语义、交易纪律、数据源优先级、Web/API 行为请看 [完整配置与部署指南](docs/full-guide.md)。
 
 ### 技术栈与数据来源
 
-| 类型 | 支持 |
-|------|------|
-| AI 模型 | [AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通义千问、Claude、Ollama 本地模型等 |
-| 行情数据 | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC)、AkShare、Tushare、Pytdx、Baostock、YFinance、Longbridge |
+
+| 类型     | 支持                                                                                                                                                                                                                                                                                        |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AI 模型  | [AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通义千问、Claude、Ollama 本地模型等                                                                                                                                                                              |
+| 行情数据 | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC)、AkShare、Tushare、Pytdx、Baostock、YFinance、Longbridge                                                                                                                                                                      |
 | 新闻搜索 | [Anspire](https://aisearch.anspire.cn/)、[SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)、[Tavily](https://tavily.com/)、[Bocha](https://open.bocha.cn/)、[Brave](https://brave.com/search/api/)、[MiniMax](https://platform.minimaxi.com/)、SearXNG |
-| 社交舆情 | [Stock Sentiment API](https://api.adanos.org/docs)（Reddit / X / Polymarket，仅美股，可选） |
+| 社交舆情 | [Stock Sentiment API](https://api.adanos.org/docs)（Reddit / X / Polymarket，仅美股，可选）                                                                                                                                                                                                 |
 
 > 完整规则见 [数据源配置](docs/full-guide.md#数据源配置)。
 
@@ -66,7 +68,6 @@
 ### 方式一：GitHub Actions（推荐）
 
 > 5 分钟完成部署，零成本，无需服务器。
-
 
 #### 1. Fork 本仓库
 
@@ -82,48 +83,52 @@
 
 > 💡 **推荐 [AIHubMix](https://aihubmix.com/?aff=CfMq)**：一个 Key 即可使用 Gemini、GPT、Claude、DeepSeek 等全球主流模型，无需科学上网，含免费模型（glm-5、gpt-4o-free 等），付费模型高稳定性无限并发。本项目可享 **10% 充值优惠**。
 
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `AIHUBMIX_KEY` | [AIHubMix](https://aihubmix.com/?aff=CfMq) API Key，一 Key 切换使用全系模型 | 可选 |
-| `GEMINI_API_KEY` | Google Gemini API Key | 可选 |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API Key | 可选 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
-| `OPENAI_BASE_URL` / `OPENAI_MODEL` | 使用 OpenAI 兼容服务时填写 | 可选 |
+
+| Secret 名称                        | 说明                                                                        | 必填 |
+| ---------------------------------- | --------------------------------------------------------------------------- | :--: |
+| `AIHUBMIX_KEY`                     | [AIHubMix](https://aihubmix.com/?aff=CfMq) API Key，一 Key 切换使用全系模型 | 可选 |
+| `GEMINI_API_KEY`                   | Google Gemini API Key                                                       | 可选 |
+| `ANTHROPIC_API_KEY`                | Anthropic Claude API Key                                                    | 可选 |
+| `OPENAI_API_KEY`                   | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等）                            | 可选 |
+| `OPENAI_BASE_URL` / `OPENAI_MODEL` | 使用 OpenAI 兼容服务时填写                                                  | 可选 |
 
 > Ollama 更适合本地 / Docker 部署，GitHub Actions 推荐使用云端 API。
 
 **通知渠道配置（至少配置一个）**
 
-| Secret 名称 | 说明 |
-|------------|------|
-| `WECHAT_WEBHOOK_URL` | 企业微信机器人 |
-| `FEISHU_WEBHOOK_URL` | 飞书机器人 |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram |
-| `DISCORD_WEBHOOK_URL` | Discord Webhook |
-| `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` | Slack Bot |
-| `EMAIL_SENDER` + `EMAIL_PASSWORD` | 邮件推送 |
+
+| Secret 名称                               | 说明            |
+| ----------------------------------------- | --------------- |
+| `WECHAT_WEBHOOK_URL`                      | 企业微信机器人  |
+| `FEISHU_WEBHOOK_URL`                      | 飞书机器人      |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram        |
+| `DISCORD_WEBHOOK_URL`                     | Discord Webhook |
+| `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID`    | Slack Bot       |
+| `EMAIL_SENDER` + `EMAIL_PASSWORD`         | 邮件推送        |
 
 更多渠道、签名校验、分组邮件、Markdown 转图片等配置见 [通知渠道详细配置](docs/full-guide.md#通知渠道详细配置)。
 
 **自选股配置（必填）**
 
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `STOCK_LIST` | 自选股代码，如 `600519,hk00700,AAPL,TSLA` | ✅ |
+
+| Secret 名称  | 说明                                     | 必填 |
+| ------------ | ---------------------------------------- | :--: |
+| `STOCK_LIST` | 自选股代码，如`600519,hk00700,AAPL,TSLA` |  ✅  |
 
 **新闻源配置（推荐）**
 
 新闻源会显著影响舆情、公告、事件和催化因素质量，建议至少配置一个搜索服务。
 
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `ANSPIRE_API_KEYS` | [Anspire AI Search](https://aisearch.anspire.cn/)：中文内容特别优化，可增强 A 股分析效果 | 推荐 |
-| `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)：搜索引擎结果补强，适合实时金融新闻 | 推荐 |
-| `TAVILY_API_KEYS` | [Tavily](https://tavily.com/)：通用新闻搜索 API | 可选 |
-| `BOCHA_API_KEYS` | [博查搜索](https://open.bocha.cn/)：中文搜索优化，支持 AI 摘要 | 可选 |
-| `BRAVE_API_KEYS` | [Brave Search](https://brave.com/search/api/)：隐私优先，美股资讯补强 | 可选 |
-| `MINIMAX_API_KEYS` | [MiniMax](https://platform.minimaxi.com/)：结构化搜索结果 | 可选 |
-| `SEARXNG_BASE_URLS` | SearXNG 自建实例：无配额兜底，适合私有部署 | 可选 |
+
+| Secret 名称         | 说明                                                                                                                       | 必填 |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------- | :--: |
+| `ANSPIRE_API_KEYS`  | [Anspire AI Search](https://aisearch.anspire.cn/)：中文内容特别优化，可增强 A 股分析效果                                   | 推荐 |
+| `SERPAPI_API_KEYS`  | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)：搜索引擎结果补强，适合实时金融新闻 | 推荐 |
+| `TAVILY_API_KEYS`   | [Tavily](https://tavily.com/)：通用新闻搜索 API                                                                            | 可选 |
+| `BOCHA_API_KEYS`    | [博查搜索](https://open.bocha.cn/)：中文搜索优化，支持 AI 摘要                                                             | 可选 |
+| `BRAVE_API_KEYS`    | [Brave Search](https://brave.com/search/api/)：隐私优先，美股资讯补强                                                      | 可选 |
+| `MINIMAX_API_KEYS`  | [MiniMax](https://platform.minimaxi.com/)：结构化搜索结果                                                                  | 可选 |
+| `SEARXNG_BASE_URLS` | SearXNG 自建实例：无配额兜底，适合私有部署                                                                                 | 可选 |
 
 更多搜索源、社交舆情和降级规则见 [搜索服务配置](docs/full-guide.md#搜索服务配置)。
 
@@ -171,6 +176,7 @@ python main.py --serve-only
 ## 📱 推送效果
 
 ### 决策仪表盘
+
 ```
 🎯 2026-02-08 决策仪表盘
 共分析3只股票 | 🟢买入:0 🟡观望:2 🔴卖出:1
@@ -201,6 +207,7 @@ python main.py --serve-only
 ```
 
 ### 大盘复盘
+
 ```
 🎯 2026-01-10 大盘复盘
 
@@ -264,11 +271,12 @@ DSA 聚焦日常分析报告；下面两个同系列项目分别覆盖选股、�
 
 ## ☕ 支持项目
 
-如果本项目对你有帮助，欢迎支持项目的持续维护与迭代，感谢支持 🙏  
+如果本项目对你有帮助，欢迎支持项目的持续维护与迭代，感谢支持 🙏
 赞赏可备注联系方式，祝股市长虹
 
-| 支付宝 (Alipay) | 微信支付 (WeChat) | 小红书 |
-| :---: | :---: | :---: |
+
+|                      支付宝 (Alipay)                      |                        微信支付 (WeChat)                        |                             小红书                             |
+| :-------------------------------------------------------: | :--------------------------------------------------------------: | :------------------------------------------------------------: |
 | <img src="./sources/alipay.jpg" width="200" alt="Alipay"> | <img src="./sources/wechatpay.jpg" width="200" alt="WeChat Pay"> | <img src="./sources/xiaohongshu.png" width="200" alt="小红书"> |
 
 ---
@@ -296,6 +304,57 @@ npm run lint
 npm run build
 ```
 
+### 系统功能测试
+
+#### 1. 全面系统测试
+
+测试所有核心模块（配置、数据源、LLM、搜索引擎、舆情API、通知渠道等）：
+
+```bash
+# 运行完整测试
+python test_full_system.py
+
+# 查看日志
+cat logs/full_system_test_*.log
+```
+
+**测试结果解读**：
+- ✅ 通过：功能正常
+- ❌ 失败：需要排查
+
+#### 2. IBKR 数据源调试
+
+专门测试 IBKR 连接和数据获取：
+
+```bash
+# 调试 IBKR 连接
+python debug_ibkr.py
+
+# 查看详细日志
+cat logs/debug_ibkr_*.log
+```
+
+**常见错误处理**：
+
+| 错误信息 | 原因 | 解决方案 |
+|---------|------|---------|
+| `Client ID already in use` | clientId 被占用 | 使用不同的 clientId（如 10、100） |
+| `API接口现处于只读模式` | Read-Only API 被勾选 | TWS > Global Configuration > API > Settings > 取消勾选 Read-Only API |
+| `Trading TWS session is connected from a different IP address` | TWS 登录 IP 与 API 连接 IP 不一致 | 确保在同一台机器运行 TWS 和 API，或使用 IB Gateway |
+| `请求的市场数据需要额外订阅` | 模拟账户未订阅市场数据 | 在 TWS 中手动订阅所需市场数据 |
+
+**IBKR 配置检查清单**：
+
+1. ✅ 启动 TWS 或 IB Gateway
+   - TWS 默认端口：7497（模拟盘）/ 7496（实盘）
+   - IB Gateway 默认端口：4002（模拟盘）/ 4001（实盘）
+2. ✅ TWS/IB Gateway > Global Configuration > API > Settings > 勾选 "Enable ActiveX and Socket Clients"
+3. ✅ 取消勾选 "Read-Only API"（否则无法下载历史数据）
+4. ✅ .env 配置：
+   - TWS: `IBKR_HOST=127.0.0.1`、`IBKR_PORT=7497`
+   - IB Gateway: `IBKR_HOST=127.0.0.1`、`IBKR_PORT=4002`
+5. ✅ 确保 TWS/IB Gateway 登录 IP 与 API 连接 IP 一致（若出现 IP 不匹配错误，需重新登录）
+
 ## 📄 License
 
 [MIT License](LICENSE) © 2026 ZhuLinsen
@@ -305,11 +364,12 @@ npm run build
 这将有助于项目的持续维护和社区发展。
 
 ## 📬 联系与合作
-- 合作邮箱：zhuls345@gmail.com
 
+- 合作邮箱：zhuls345@gmail.com
 - GitHub Issues：[提交 Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
 
 ## ⭐ Star History
+
 **如果觉得有用，请给个 ⭐ Star 支持一下！**
 
 <a href="https://star-history.com/#ZhuLinsen/daily_stock_analysis&Date">

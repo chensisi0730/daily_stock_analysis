@@ -863,6 +863,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .ibkr_fetcher import IbkrFetcher
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
         akshare = AkshareFetcher()
@@ -871,6 +872,7 @@ class DataFetcherManager:
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
         longbridge = LongbridgeFetcher()  # 长桥（美股/港股兜底，懒加载）
+        ibkr = IbkrFetcher()        # IBKR（美股/港股直连，配置后最高优先级）
 
         # 初始化数据源列表
         self._ensure_concurrency_guards()
@@ -883,9 +885,10 @@ class DataFetcherManager:
                 baostock,
                 yfinance,
                 longbridge,
+                ibkr,
             ]
 
-            # 按优先级排序（Tushare 如果配置了 Token 且初始化成功，优先级为 0）
+            # 按优先级排序（Tushare/IBKR 如果配置了 Token/连接且初始化成功，优先级为 0）
             self._fetchers.sort(key=lambda f: f.priority)
 
         # 构建优先级说明
@@ -939,21 +942,25 @@ class DataFetcherManager:
         request_start = time.time()
 
         # 快速路径：美股/港股使用专用数据源路由
-        #   - 配置长桥凭据后: Longbridge 为首选, YFinance/AkShare 兜底
+        #   - 配置 IBKR 后: IbkrFetcher 为首选, Longbridge/YFinance 兜底
+        #   - 配置长桥凭据后: Longbridge 为次选, YFinance/AkShare 兜底
         #   - 未配置长桥:     YFinance 为首选（美股）, 通用 fetcher 循环（港股）
         #   - 美股指数:       始终 YFinance 为首选（Longbridge 不提供指数K线）
         is_us_index = is_us_index_code(stock_code)
         is_us = is_us_index or is_us_stock_code(stock_code)
         is_hk = (not is_us) and _is_hk_market(stock_code)
 
-        # 美股（含美股指数）使用 Longbridge/YFinance 特殊路由；港股走下方通用数据源循环
+        # 美股（含美股指数）使用 IBKR/Longbridge/YFinance 特殊路由；港股走下方通用数据源循环
         if is_us:
+            prefer_ibkr = self._ibkr_preferred() and not is_us_index
             prefer_lb = self._longbridge_preferred() and not is_us_index
-            source_order = (
-                ["LongbridgeFetcher", "YfinanceFetcher"]
-                if prefer_lb
-                else ["YfinanceFetcher", "LongbridgeFetcher"]
-            )
+
+            if prefer_ibkr:
+                source_order = ["IbkrFetcher", "LongbridgeFetcher", "YfinanceFetcher"]
+            elif prefer_lb:
+                source_order = ["LongbridgeFetcher", "YfinanceFetcher"]
+            else:
+                source_order = ["YfinanceFetcher", "LongbridgeFetcher"]
             market_label = "美股指数" if is_us_index else "美股"
 
             for src_name in source_order:
@@ -1168,10 +1175,18 @@ class DataFetcherManager:
         is_hk = (not is_us) and _is_hk_market(stock_code)
 
         if is_us or is_hk:
+            prefer_ibkr = self._ibkr_preferred() and not is_us_index
             prefer_lb = self._longbridge_preferred() and not is_us_index
             if is_us:
-                primary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
-                secondary_src = "YfinanceFetcher" if prefer_lb else "LongbridgeFetcher"
+                if prefer_ibkr:
+                    primary_src = "IbkrFetcher"
+                    secondary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
+                elif prefer_lb:
+                    primary_src = "LongbridgeFetcher"
+                    secondary_src = "YfinanceFetcher"
+                else:
+                    primary_src = "YfinanceFetcher"
+                    secondary_src = "LongbridgeFetcher"
                 market_label = "美股指数" if is_us_index else "美股"
                 primary_kw: dict = {}
                 secondary_kw: dict = {}
@@ -1321,6 +1336,17 @@ class DataFetcherManager:
                     setattr(primary, f, val)
                     filled.append(f)
         return filled
+
+    def _ibkr_preferred(self) -> bool:
+        """Return True when IBKR is configured and available.
+
+        When True, US stock routing uses IBKR as the primary data source
+        with Longbridge/YFinance as fallback.
+        """
+        for f in self._get_fetchers_snapshot():
+            if f.name == "IbkrFetcher":
+                return hasattr(f, '_is_available') and f._is_available()
+        return False
 
     def _longbridge_preferred(self) -> bool:
         """Return True when Longbridge keys are configured and available.

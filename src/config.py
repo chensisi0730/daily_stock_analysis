@@ -597,6 +597,13 @@ class Config:
     longbridge_app_secret: Optional[str] = None
     longbridge_access_token: Optional[str] = None
 
+    # === IBKR (Interactive Brokers) 配置 ===
+    ibkr_host: Optional[str] = None
+    ibkr_port: int = 7497
+    ibkr_client_id: int = 1
+    ibkr_account: Optional[str] = None
+    ibkr_connect_timeout: float = 10.0
+
     # === AI 分析配置 ===
     # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-2.5-flash)
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
@@ -1282,6 +1289,11 @@ class Config:
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
             longbridge_app_secret=os.getenv('LONGBRIDGE_APP_SECRET') or None,
             longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None,
+            ibkr_host=os.getenv('IBKR_HOST', '127.0.0.1').strip() or None,
+            ibkr_port=parse_env_int(os.getenv('IBKR_PORT'), 7497, field_name='IBKR_PORT'),
+            ibkr_client_id=parse_env_int(os.getenv('IBKR_CLIENT_ID'), 1, field_name='IBKR_CLIENT_ID'),
+            ibkr_account=os.getenv('IBKR_ACCOUNT') or None,
+            ibkr_connect_timeout=parse_env_float(os.getenv('IBKR_CONNECT_TIMEOUT'), 10.0, field_name='IBKR_CONNECT_TIMEOUT'),
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
