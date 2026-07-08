@@ -131,6 +131,8 @@ class IbkrFetcher(BaseFetcher):
             "request_timeout": _parse_env_float("IBKR_REQUEST_TIMEOUT", 30.0),
         }
 
+    _next_client_id = 1000
+
     @property
     def priority(self) -> int:
         if _IB_INSYNC_AVAILABLE and self._is_available():
@@ -245,8 +247,9 @@ class IbkrFetcher(BaseFetcher):
                 "",
                 False,
                 False,
+                genericTickList="101,104,106,254,258,259,260,261,262",
             )
-            ib.sleep(2)
+            ib.sleep(3)
 
             price = None
             if hasattr(ticker, "last") and ticker.last:
@@ -275,6 +278,23 @@ class IbkrFetcher(BaseFetcher):
             volume_raw = getattr(ticker, "volume", None)
             volume = int(volume_raw) if volume_raw else None
 
+            pe_ratio = None
+            pb_ratio = None
+            total_mv = None
+
+            fundamental_data = self._get_fundamental_data(qualified)
+            if fundamental_data:
+                pe_ratio = safe_float(fundamental_data.get("pe_ratio"))
+                pb_ratio = safe_float(fundamental_data.get("pb_ratio"))
+                total_mv = safe_float(fundamental_data.get("market_cap"))
+                logger.debug(
+                    "[IBKR] %s 基本面数据: PE=%.2f, PB=%.2f, 市值=%.2f",
+                    stock_code,
+                    pe_ratio or 0,
+                    pb_ratio or 0,
+                    total_mv or 0,
+                )
+
             ib.cancelMktData(qualified)
 
             quote = UnifiedRealtimeQuote(
@@ -293,23 +313,142 @@ class IbkrFetcher(BaseFetcher):
                 high=high,
                 low=low,
                 pre_close=prev_close,
-                pe_ratio=None,
-                pb_ratio=None,
-                total_mv=None,
+                pe_ratio=pe_ratio,
+                pb_ratio=pb_ratio,
+                total_mv=total_mv,
                 circ_mv=None,
             )
 
             logger.info(
-                "[IBKR] %s 实时行情: 价格=%.2f, 涨跌幅=%s%%",
+                "[IBKR] %s 实时行情: 价格=%.2f, 涨跌幅=%s%%, PE=%s, PB=%s",
                 stock_code,
                 price,
                 change_pct,
+                pe_ratio,
+                pb_ratio,
             )
             return quote
 
         except Exception as exc:
             logger.warning("[IBKR] 获取 %s 实时行情失败: %s", stock_code, exc)
             self._disconnect()
+            return None
+
+    # ------------------------------------------------------------------
+    # 基本面数据
+    # ------------------------------------------------------------------
+
+    def _get_fundamental_data(self, contract: Any) -> Optional[Dict[str, Any]]:
+        """
+        通过 IBKR API 获取股票基本面数据。
+        
+        使用 reqFundamentalData 请求 Fundamental Ratios 报告，解析 PE、PB、市值等指标。
+        如果 IBKR 获取失败，尝试使用 Yfinance 作为兜底。
+        
+        Args:
+            contract: IBKR 合约对象
+            
+        Returns:
+            Dict 包含基本面数据，失败返回 None
+        """
+        ib = self._connect()
+        if ib is None:
+            return None
+
+        try:
+            report = ib.reqFundamentalData(
+                contract,
+                "ReportSnapshot",
+            )
+            if report:
+                import xml.etree.ElementTree as ET
+
+                root = ET.fromstring(report)
+                result = {}
+
+                for field in root.iter():
+                    tag = field.tag
+                    text = field.text
+                    if not text:
+                        continue
+
+                    try:
+                        val = float(text)
+                    except ValueError:
+                        continue
+
+                    if "P/E" in tag or "peRatio" in tag.lower():
+                        result["pe_ratio"] = val
+                    elif "P/B" in tag or "pbRatio" in tag.lower():
+                        result["pb_ratio"] = val
+                    elif "Market Cap" in tag or "marketCap" in tag.lower():
+                        result["market_cap"] = val
+                    elif "Dividend" in tag:
+                        result["dividend"] = val
+                    elif "EPS" in tag:
+                        result["eps"] = val
+                    elif "ROE" in tag:
+                        result["roe"] = val
+
+                if result:
+                    logger.debug(
+                        "[IBKR] %s 解析基本面数据: %s",
+                        contract.symbol,
+                        result,
+                    )
+                    return result
+
+            logger.debug("[IBKR] %s 无基本面数据，尝试 Yfinance 兜底", contract.symbol)
+            return self._get_fundamental_from_yfinance(contract.symbol)
+
+        except Exception as exc:
+            logger.debug("[IBKR] 获取 %s 基本面数据失败: %s，尝试 Yfinance", contract.symbol, exc)
+            return self._get_fundamental_from_yfinance(contract.symbol)
+
+    def _get_fundamental_from_yfinance(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        通过 Yfinance 获取基本面数据作为 IBKR 的兜底。
+        
+        Args:
+            symbol: 股票代码（如 AAPL, TSLA）
+            
+        Returns:
+            Dict 包含基本面数据，失败返回 None
+        """
+        try:
+            import yfinance as yf
+
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+
+            result = {}
+
+            pe_ratio = info.get('trailingPE') or info.get('forwardPE')
+            if pe_ratio:
+                result["pe_ratio"] = float(pe_ratio)
+
+            pb_ratio = info.get('priceToBook')
+            if pb_ratio:
+                result["pb_ratio"] = float(pb_ratio)
+
+            market_cap = info.get('marketCap')
+            if market_cap:
+                result["market_cap"] = float(market_cap)
+
+            if result:
+                logger.debug(
+                    "[Yfinance] %s 基本面数据: PE=%.2f, PB=%.2f, 市值=%.2f",
+                    symbol,
+                    result.get("pe_ratio", 0),
+                    result.get("pb_ratio", 0),
+                    result.get("market_cap", 0),
+                )
+                return result
+
+            return None
+
+        except Exception as exc:
+            logger.debug("[Yfinance] 获取 %s 基本面数据失败: %s", symbol, exc)
             return None
 
     # ------------------------------------------------------------------

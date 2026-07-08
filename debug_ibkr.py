@@ -117,6 +117,50 @@ try:
                     ib.cancelMktData(qualified)
                 except Exception as e:
                     print(f"❌ 获取实时行情失败: {e}")
+                
+                # 测试基本面数据
+                print(f"\n📊 测试基本面数据:")
+                try:
+                    report = ib.reqFundamentalData(qualified, "ReportSnapshot")
+                    if report:
+                        print(f"✅ 获取基本面数据成功")
+                        print(f"   数据长度: {len(report)} 字符")
+                        print(f"   前500字符:\n{report[:500]}...")
+                        
+                        try:
+                            import xml.etree.ElementTree as ET
+                            root = ET.fromstring(report)
+                            print(f"\n   XML 解析成功，根标签: {root.tag}")
+                            
+                            all_tags = []
+                            for field in root.iter():
+                                tag = field.tag
+                                text = field.text
+                                if text and len(text) < 200:
+                                    try:
+                                        val = float(text)
+                                        all_tags.append((tag, val))
+                                    except ValueError:
+                                        pass
+                            
+                            print(f"\n   找到 {len(all_tags)} 个数值字段，前30个:")
+                            for tag, val in all_tags[:30]:
+                                print(f"   {tag}: {val}")
+                                
+                            pe_fields = [(t, v) for t, v in all_tags if any(k in t for k in ["PE", "pe", "P/E", "PriceEarnings"])]
+                            pb_fields = [(t, v) for t, v in all_tags if any(k in t for k in ["PB", "pb", "P/B", "PriceBook"])]
+                            cap_fields = [(t, v) for t, v in all_tags if any(k in t for k in ["Cap", "cap", "Market", "market"])]
+                            
+                            print(f"\n   PE相关字段: {pe_fields}")
+                            print(f"   PB相关字段: {pb_fields}")
+                            print(f"   市值相关字段: {cap_fields[:10]}")
+                            
+                        except Exception as e:
+                            print(f"   ⚠️ XML 解析失败: {e}")
+                    else:
+                        print(f"❌ 无基本面数据返回")
+                except Exception as e:
+                    print(f"❌ 获取基本面数据失败: {e}")
                     
             else:
                 print(f"❌ 未找到合约详情")

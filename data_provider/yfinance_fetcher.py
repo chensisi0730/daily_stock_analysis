@@ -730,6 +730,18 @@ class YfinanceFetcher(BaseFetcher):
             if high is not None and low is not None and prev_close is not None and prev_close > 0:
                 amplitude = ((high - low) / prev_close) * 100
 
+            # 获取基本面数据（PE、PB、市值等）
+            try:
+                full_info = ticker.info
+                pe_ratio = full_info.get('trailingPE') or full_info.get('forwardPE')
+                pb_ratio = full_info.get('priceToBook')
+                
+                if market_cap is None:
+                    market_cap = full_info.get('marketCap')
+            except Exception:
+                pe_ratio = None
+                pb_ratio = None
+
             # 获取股票名称
             try:
                 info_name = ticker.info.get('shortName', '') or ticker.info.get('longName', '') or ''
@@ -753,13 +765,16 @@ class YfinanceFetcher(BaseFetcher):
                 high=high,
                 low=low,
                 pre_close=prev_close,
-                pe_ratio=None,
-                pb_ratio=None,
+                pe_ratio=round(pe_ratio, 2) if pe_ratio is not None else None,
+                pb_ratio=round(pb_ratio, 2) if pb_ratio is not None else None,
                 total_mv=market_cap,
                 circ_mv=None,
             )
 
-            logger.info(f"[Yfinance] 获取美股 {symbol} 实时行情成功: 价格={price}")
+            logger.info(
+                f"[Yfinance] 获取美股 {symbol} 实时行情成功: 价格={price}, "
+                f"PE={pe_ratio}, PB={pb_ratio}, 市值={market_cap}"
+            )
             return quote
 
         except Exception as e:
