@@ -23,9 +23,8 @@ class TestSearXNGSearchProvider(unittest.TestCase):
 
     def setUp(self) -> None:
         SearXNGSearchProvider.reset_public_instance_cache()
-        # Clear penalized-instance state if the provider implements it.
-        if hasattr(SearXNGSearchProvider, "_penalized_instances"):
-            SearXNGSearchProvider._penalized_instances.clear()
+        # 失败实例黑名单是类级共享状态，必须逐个用例重置，避免跨用例污染
+        SearXNGSearchProvider.reset_instance_blacklist()
 
     def _create_provider(
         self,

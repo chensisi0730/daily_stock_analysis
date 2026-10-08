@@ -11,7 +11,10 @@ A股自选股智能分析系统 - 搜索服务模块
 4. 搜索结果缓存和格式化
 """
 
+import hashlib
+import json
 import logging
+import os
 import re
 import threading
 import time
@@ -19,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from itertools import cycle
 from urllib.parse import parse_qsl, unquote, urlparse
@@ -49,6 +53,149 @@ _SEARCH_TRANSIENT_EXCEPTIONS = (
     requests.exceptions.ChunkedEncodingError,
 )
 
+# 永久性错误（余额不足 / 权限无效）导致的禁用 key 会持久化到这里，
+# 避免每次新进程启动时重复踩同一个坏 key。
+# 位置跟随 DATABASE_PATH 所在的数据目录，不额外引入配置项。
+_DISABLED_KEYS_FILENAME = "search_disabled_keys.json"
+_DISABLED_KEYS_TTL_SECONDS = 12 * 3600  # 半天后自动放行，续费/充值后可恢复使用
+_SEARCH_STATE_LOCK = threading.RLock()
+
+_SYSTEM_PROXY_ENV_KEYS = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+)
+
+
+def _project_proxy_enabled() -> bool:
+    """Whether the project enables its own proxy via USE_PROXY."""
+    return (os.getenv("USE_PROXY", "") or "").strip().lower() == "true"
+
+
+def _proxy_overrides() -> Optional[Dict[str, Any]]:
+    """Return a proxies override that bypasses system proxy env when running direct.
+
+    ``USE_PROXY=false`` means the project wants direct connections, but requests
+    still picks up ``HTTP_PROXY`` / ``HTTPS_PROXY`` exported by the shell (many
+    local proxy tools set them globally), so a flaky proxy breaks every search
+    request. Passing an explicit empty mapping wins over the environment
+    (requests merges env proxies with ``setdefault``).
+
+    Returns ``None`` when the project manages its own proxy or when no proxy env
+    exists, so the original call shape is preserved.
+    """
+    if _project_proxy_enabled():
+        return None
+    if not any(os.environ.get(key) for key in _SYSTEM_PROXY_ENV_KEYS):
+        return None
+    return {"http": None, "https": None, "all": None}
+
+
+def _http_get(url: str, *, use_system_proxy: bool = False, **kwargs) -> requests.Response:
+    """``requests.get`` honoring the project's proxy switch.
+
+    ``use_system_proxy=True`` keeps the shell-provided proxy (used by hosts that
+    are only reachable through it, e.g. searx.space and public SearXNG nodes).
+    """
+    if not use_system_proxy:
+        proxies = _proxy_overrides()
+        if proxies is not None:
+            kwargs.setdefault("proxies", proxies)
+    return requests.get(url, **kwargs)
+
+
+def _http_post(url: str, *, use_system_proxy: bool = False, **kwargs) -> requests.Response:
+    """``requests.post`` honoring the project's proxy switch."""
+    if not use_system_proxy:
+        proxies = _proxy_overrides()
+        if proxies is not None:
+            kwargs.setdefault("proxies", proxies)
+    return requests.post(url, **kwargs)
+
+
+def _hash_api_key(api_key: str) -> str:
+    """Return a short non-reversible fingerprint of an API key."""
+    return hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _disabled_keys_file() -> Path:
+    """Resolve the disabled-key cache file from the configured database path."""
+    db_path = (os.getenv("DATABASE_PATH", "") or "").strip()
+    if not db_path:
+        try:
+            from src.config import get_config
+
+            db_path = getattr(get_config(), "database_path", "") or ""
+        except Exception:  # pragma: no cover - defensive branch
+            db_path = ""
+    base = Path(db_path or "./data/stock_analysis.db").expanduser()
+    return (base.parent or Path(".")) / _DISABLED_KEYS_FILENAME
+
+
+def _load_disabled_key_hashes(provider_name: str) -> set:
+    """Load persisted disabled-key fingerprints for a provider, dropping expired ones."""
+    path = _disabled_keys_file()
+    if not path.exists():
+        return set()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:  # pragma: no cover - corrupted cache falls back to empty
+        return set()
+
+    entries = raw.get(provider_name) or {}
+    now = time.time()
+    alive = {
+        key_hash
+        for key_hash, ts in entries.items()
+        if isinstance(ts, (int, float)) and (now - ts) < _DISABLED_KEYS_TTL_SECONDS
+    }
+    return alive
+
+
+def reset_disabled_keys_cache() -> None:
+    """Drop the persisted disabled-key cache (used by tests / manual reset)."""
+    path = _disabled_keys_file()
+    with _SEARCH_STATE_LOCK:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception:  # pragma: no cover - best-effort cleanup
+            logger.debug("[搜索] 清理禁用 key 缓存失败: %s", path)
+
+
+def _persist_disabled_key(provider_name: str, api_key: str) -> None:
+    """Persist a fatally-broken API key so later runs skip it without a request."""
+    path = _disabled_keys_file()
+    now = time.time()
+    with _SEARCH_STATE_LOCK:
+        raw: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+            except Exception:  # pragma: no cover - corrupted cache is rewritten
+                raw = {}
+
+        # 全量清理过期条目，避免文件无限增长
+        for _name, _entries in list(raw.items()):
+            for _key_hash, _ts in list((_entries or {}).items()):
+                if not isinstance(_ts, (int, float)) or (now - _ts) >= _DISABLED_KEYS_TTL_SECONDS:
+                    _entries.pop(_key_hash, None)
+            if not _entries:
+                raw.pop(_name, None)
+
+        raw.setdefault(provider_name, {})[_hash_api_key(api_key)] = now
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            tmp_path.replace(path)
+        except Exception as exc:  # pragma: no cover - best-effort persistence
+            logger.debug("[%s] 持久化禁用 key 失败（仅影响本次去重）: %s", provider_name, exc)
+
 
 @retry(
     stop=stop_after_attempt(3),
@@ -58,7 +205,7 @@ _SEARCH_TRANSIENT_EXCEPTIONS = (
 )
 def _post_with_retry(url: str, *, headers: Dict[str, str], json: Dict[str, Any], timeout: int) -> requests.Response:
     """POST with retry on transient SSL/network errors."""
-    return requests.post(url, headers=headers, json=json, timeout=timeout)
+    return _http_post(url, headers=headers, json=json, timeout=timeout)
 
 
 @retry(
@@ -69,10 +216,21 @@ def _post_with_retry(url: str, *, headers: Dict[str, str], json: Dict[str, Any],
     reraise=True,
 )
 def _get_with_retry(
-    url: str, *, headers: Dict[str, str], params: Dict[str, Any], timeout: int
+    url: str,
+    *,
+    headers: Dict[str, str],
+    params: Dict[str, Any],
+    timeout: int,
+    use_system_proxy: bool = False,
 ) -> requests.Response:
     """GET with retry on transient SSL/network errors."""
-    return requests.get(url, headers=headers, params=params, timeout=timeout)
+    return _http_get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=timeout,
+        use_system_proxy=use_system_proxy,
+    )
 
 
 def fetch_url_content(url: str, timeout: int = 5) -> str:
@@ -158,6 +316,11 @@ class BaseSearchProvider(ABC):
         self._key_cycle = cycle(api_keys) if api_keys else None
         self._key_usage: Dict[str, int] = {key: 0 for key in api_keys}
         self._key_errors: Dict[str, int] = {key: 0 for key in api_keys}
+        self._disabled_keys: set = set()  # 永久禁用的 key（如余额不足、权限无效）
+        # 跨进程复用上一次运行的禁用结论（按 key 指纹匹配，不落明文）
+        self._disabled_keys = {
+            key for key in api_keys if _hash_api_key(key) in _load_disabled_key_hashes(name)
+        }
         self._state_lock = threading.RLock()
     
     @property
@@ -166,8 +329,10 @@ class BaseSearchProvider(ABC):
     
     @property
     def is_available(self) -> bool:
-        """检查是否有可用的 API Key"""
-        return bool(self._api_keys)
+        """检查是否有可用的 API Key（排除已禁用的）"""
+        disabled = {_hash_api_key(k) for k in self._disabled_keys}
+        available = [k for k in self._api_keys if _hash_api_key(k) not in disabled]
+        return bool(available)
     
     def _get_next_key(self) -> Optional[str]:
         """
@@ -178,18 +343,29 @@ class BaseSearchProvider(ABC):
         with self._state_lock:
             if not self._key_cycle:
                 return None
-            
+
+            # 过滤掉已永久禁用的 key
+            disabled = {_hash_api_key(k) for k in self._disabled_keys}
+            active_keys = [k for k in self._api_keys if _hash_api_key(k) not in disabled]
+            if not active_keys:
+                logger.debug(f"[{self._name}] 所有 API Key 已被禁用（余额不足/权限无效）")
+                return None
+
             # 最多尝试所有 key
             for _ in range(len(self._api_keys)):
                 key = next(self._key_cycle)
+                # 跳过已禁用的 key
+                if _hash_api_key(key) in disabled:
+                    continue
                 # 跳过错误次数过多的 key（超过 3 次）
                 if self._key_errors.get(key, 0) < 3:
                     return key
-            
-            # 所有 key 都有问题，重置错误计数并返回第一个
-            logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
-            self._key_errors = {key: 0 for key in self._api_keys}
-            return self._api_keys[0] if self._api_keys else None
+
+            # 所有活跃 key 都有错误记录，重置错误计数
+            logger.warning(f"[{self._name}] 所有活跃 API Key 都有错误记录，重置错误计数")
+            for k in active_keys:
+                self._key_errors[k] = 0
+            return active_keys[0]
     
     def _record_success(self, key: str) -> None:
         """记录成功使用"""
@@ -199,9 +375,26 @@ class BaseSearchProvider(ABC):
             if key in self._key_errors and self._key_errors[key] > 0:
                 self._key_errors[key] -= 1
     
-    def _record_error(self, key: str) -> None:
-        """记录错误"""
+    def _record_error(self, key: str, *, error_message: str = "") -> None:
+        """记录错误
+
+        当错误信息表明 key 永久失效（余额不足、权限无效）时，
+        直接禁用该 key，避免反复重试浪费请求。
+        """
         with self._state_lock:
+            # 检测永久性错误
+            fatal_keywords = ["余额不足", "权限不足", "insufficient", "unauthorized", "invalid key", "api key 无效"]
+            if any(kw in error_message.lower() for kw in fatal_keywords):
+                already_disabled = _hash_api_key(key) in {
+                    _hash_api_key(k) for k in self._disabled_keys
+                }
+                self._disabled_keys.add(key)
+                # 持久化后，后续进程启动即跳过该 key，不必每次重踩一次
+                _persist_disabled_key(self._name, key)
+                log = logger.debug if already_disabled else logger.warning
+                log(f"[{self._name}] API Key {key[:8]}... 已禁用: {error_message}")
+                return
+
             self._key_errors[key] = self._key_errors.get(key, 0) + 1
             error_count = self._key_errors[key]
         logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {error_count}")
@@ -240,12 +433,12 @@ class BaseSearchProvider(ABC):
                 self._record_success(api_key)
                 logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
             else:
-                self._record_error(api_key)
+                self._record_error(api_key, error_message=response.error_message or "")
 
             return response
 
         except Exception as e:
-            self._record_error(api_key)
+            self._record_error(api_key, error_message=str(e))
             elapsed = time.time() - start_time
             logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
             return SearchResponse(
@@ -392,12 +585,12 @@ class TavilySearchProvider(BaseSearchProvider):
                 self._record_success(api_key)
                 logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
             else:
-                self._record_error(api_key)
+                self._record_error(api_key, error_message=response.error_message or "")
 
             return response
 
         except Exception as e:
-            self._record_error(api_key)
+            self._record_error(api_key, error_message=str(e))
             elapsed = time.time() - start_time
             logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
             return SearchResponse(
@@ -1536,7 +1729,7 @@ class BraveSearchProvider(BaseSearchProvider):
                 params["country"] = country
 
             # 执行搜索（GET 请求）
-            response = requests.get(
+            response = _http_get(
                 self.API_ENDPOINT,
                 headers=headers,
                 params=params,
@@ -1699,6 +1892,10 @@ class SearXNGSearchProvider(BaseSearchProvider):
     PUBLIC_INSTANCES_POOL_LIMIT = 20
     PUBLIC_INSTANCES_MAX_ATTEMPTS = 3
     PUBLIC_INSTANCES_TIMEOUT_SECONDS = 5
+    # 失败实例的拉黑时长：公共实例良莠不齐，短时间别再选它
+    INSTANCE_BLACKLIST_TTL_SECONDS = 600
+    _INSTANCE_BLACKLIST: Dict[str, float] = {}
+    _INSTANCE_BLACKLIST_LOCK = threading.RLock()
     SELF_HOSTED_TIMEOUT_SECONDS = 10
 
     _public_instances_cache: Optional[Tuple[float, List[str]]] = None
@@ -1723,6 +1920,12 @@ class SearXNGSearchProvider(BaseSearchProvider):
         with cls._public_instances_lock:
             cls._public_instances_cache = None
             cls._public_instances_stale_retry_after = 0.0
+
+    @classmethod
+    def reset_instance_blacklist(cls) -> None:
+        """Clear blacklisted SearXNG instances (used by tests)."""
+        with cls._INSTANCE_BLACKLIST_LOCK:
+            cls._INSTANCE_BLACKLIST.clear()
 
     @staticmethod
     def _parse_http_error(response) -> str:
@@ -1824,9 +2027,11 @@ class SearXNGSearchProvider(BaseSearchProvider):
                     return stale_urls
 
             try:
-                response = requests.get(
+                response = _http_get(
                     cls.PUBLIC_INSTANCES_URL,
                     timeout=cls.PUBLIC_INSTANCES_TIMEOUT_SECONDS,
+                    # searx.space 与公共实例多在墙外，保持 shell 代理不变
+                    use_system_proxy=True,
                 )
                 if response.status_code != 200:
                     logger.warning(
@@ -1867,11 +2072,40 @@ class SearXNGSearchProvider(BaseSearchProvider):
     def _rotate_candidates(self, pool: List[str], *, max_attempts: int) -> List[str]:
         if not pool or max_attempts <= 0:
             return []
+        # 跳过近期失败过的实例（SearXNG 公共实例质量参差，避免反复命中坏节点）
+        bad = {url for url in pool if self._is_instance_blacklisted(url)}
+        healthy = [url for url in pool if url not in bad]
+        if not healthy:
+            logger.warning(
+                "[SearXNG] 候选实例全部在黑名单冷却期内，清空黑名单后重试（可能是瞬时故障）"
+            )
+            with self._INSTANCE_BLACKLIST_LOCK:
+                self._INSTANCE_BLACKLIST.clear()
+            healthy = list(pool)
         with self._cursor_lock:
-            start = self._cursor % len(pool)
-            self._cursor = (self._cursor + 1) % len(pool)
-        ordered = pool[start:] + pool[:start]
+            start = self._cursor % len(healthy)
+            self._cursor = (self._cursor + 1) % len(healthy)
+        ordered = healthy[start:] + healthy[:start]
         return ordered[:max_attempts]
+
+    @classmethod
+    def _blacklist_instance(cls, base_url: str) -> None:
+        """Temporarily skip a SearXNG instance that just failed."""
+        with cls._INSTANCE_BLACKLIST_LOCK:
+            cls._INSTANCE_BLACKLIST[base_url] = (
+                time.time() + cls.INSTANCE_BLACKLIST_TTL_SECONDS
+            )
+
+    @classmethod
+    def _is_instance_blacklisted(cls, base_url: str) -> bool:
+        with cls._INSTANCE_BLACKLIST_LOCK:
+            until = cls._INSTANCE_BLACKLIST.get(base_url)
+            if until is None:
+                return False
+            if time.time() >= until:
+                cls._INSTANCE_BLACKLIST.pop(base_url, None)
+                return False
+            return True
 
     def _do_search(  # type: ignore[override]
         self,
@@ -1899,8 +2133,15 @@ class SearXNGSearchProvider(BaseSearchProvider):
                 "pageno": 1,
             }
 
-            request_get = _get_with_retry if retry_enabled else requests.get
-            response = request_get(search_url, headers=headers, params=params, timeout=timeout)
+            request_get = _get_with_retry if retry_enabled else _http_get
+            # 公共 SearXNG 实例常在墙外，保持 shell 代理不变（仅自建实例无此需求）
+            response = request_get(
+                search_url,
+                headers=headers,
+                params=params,
+                timeout=timeout,
+                use_system_proxy=True,
+            )
 
             if response.status_code != 200:
                 error_msg = self._parse_http_error(response)
@@ -2069,7 +2310,14 @@ class SearXNGSearchProvider(BaseSearchProvider):
                 return response
 
             errors.append(f"{base_url}: {response.error_message or '未知错误'}")
-            logger.warning("[%s] 实例 %s 搜索失败: %s", self.name, base_url, response.error_message)
+            logger.debug(
+                "[%s] 实例 %s 搜索失败（%.0fs 内不再选用）: %s",
+                self.name,
+                base_url,
+                self.INSTANCE_BLACKLIST_TTL_SECONDS,
+                response.error_message,
+            )
+            self._blacklist_instance(base_url)
 
         elapsed = time.time() - start_time
         return SearchResponse(

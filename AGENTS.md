@@ -75,6 +75,15 @@ python main.py --market-review
 python main.py --schedule
 python main.py --serve
 python main.py --serve-only
+python main.py  --force-run --stocks 600519,hk00700,AAPL
+
+临时屏蔽（推荐）
+bash
+LLM_CHANNELS=cloud_qwen,deepseek /Users/css/miniconda3/bin/python3 main.py
+原理：src/config.py:554 的 setup_env(override=False) 调用 load_dotenv(override=False)，也就是系统环境变量优先于 .env，所以在命令前面加个变量赋值就能覆盖，.env 一行不用动。
+
+今日所有相关市场均为非交易日，跳过执行。可使用 --force-run 强制执行
+
 uvicorn server:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -132,53 +141,54 @@ gh run view <run_id> --log-failed
 
 当前仓库 CI 主要包含：
 
-| 检查项 | 来源 | 说明 | 是否阻断 |
-| --- | --- | --- | --- |
-| `ai-governance` | `.github/workflows/ci.yml` | 校验 `AGENTS.md` / `CLAUDE.md` / `.github` 指令 / `.claude/skills` 关系 | 是 |
-| `backend-gate` | `.github/workflows/ci.yml` | 执行 `./scripts/ci_gate.sh` | 是 |
-| `docker-build` | `.github/workflows/ci.yml` | Docker 构建与关键模块导入 smoke | 是 |
-| `web-gate` | `.github/workflows/ci.yml` | 前端改动时执行 `npm run lint` + `npm run build` | 是（触发时） |
-| `network-smoke` | `.github/workflows/network-smoke.yml` | `pytest -m network` + `test.sh quick` | 否，观测项 |
-| `pr-review` | `.github/workflows/pr-review.yml` | PR 静态检查 + AI 审查 + 自动标签 | 否，辅助项 |
+| 检查项            | 来源                                    | 说明                                                                            | 是否阻断     |
+| ----------------- | --------------------------------------- | ------------------------------------------------------------------------------- | ------------ |
+| `ai-governance` | `.github/workflows/ci.yml`            | 校验 `AGENTS.md` / `CLAUDE.md` / `.github` 指令 / `.claude/skills` 关系 | 是           |
+| `backend-gate`  | `.github/workflows/ci.yml`            | 执行 `./scripts/ci_gate.sh`                                                   | 是           |
+| `docker-build`  | `.github/workflows/ci.yml`            | Docker 构建与关键模块导入 smoke                                                 | 是           |
+| `web-gate`      | `.github/workflows/ci.yml`            | 前端改动时执行 `npm run lint` + `npm run build`                             | 是（触发时） |
+| `network-smoke` | `.github/workflows/network-smoke.yml` | `pytest -m network` + `test.sh quick`                                       | 否，观测项   |
+| `pr-review`     | `.github/workflows/pr-review.yml`     | PR 静态检查 + AI 审查 + 自动标签                                                | 否，辅助项   |
 
 若 PR 上已有对应 CI 结果，可直接引用 CI 结论；若 CI 未覆盖改动面，或本地与 CI 环境差异较大，需要补充说明本地验证与缺口。
 
 ### 按改动面执行
 
 - Python 后端改动：
+
   - 适用范围：`main.py`、`src/`、`data_provider/`、`api/`、`bot/`、`tests/`
   - 优先执行：`./scripts/ci_gate.sh`
   - 最低要求：`python -m py_compile <changed_python_files>`
   - 若影响 API、任务编排、报告生成、通知发送、数据源 fallback、认证、调度，交付说明中要写明是否覆盖了对应路径。
-
 - Web 前端改动：
+
   - 适用范围：`apps/dsa-web/`
   - 默认执行：`cd apps/dsa-web && npm ci && npm run lint && npm run build`
   - 若涉及 API 联调、路由、状态管理、Markdown/图表渲染或认证状态，交付说明中要明确说明联动面和未覆盖风险。
-
 - 桌面端改动：
+
   - 适用范围：`apps/dsa-desktop/`、`scripts/run-desktop.ps1`、`scripts/build-desktop*.ps1`、`scripts/build-*.sh`、`docs/desktop-package.md`
   - 默认执行：先构建 Web，再构建桌面端
   - 如受平台限制未能完整验证，需要明确说明是否验证了 Web 构建产物、Electron 构建以及 Release 工作流影响。
-
 - API / Schema / 认证联动改动：
+
   - 适用范围：`api/**`、`src/schemas/**`、`src/services/**`、`apps/dsa-web/**`、`apps/dsa-desktop/**`
   - 至少覆盖对应后端验证 + 受影响客户端构建验证。
   - 若涉及登录、Cookie、会话、轮询状态、字段增删或枚举变化，必须明确写出兼容性影响。
-
 - 文档与治理文件改动：
+
   - 适用范围：`README.md`、`docs/**`、`AGENTS.md`、`.github/copilot-instructions.md`、`.github/instructions/**`、`.claude/skills/**`
   - 不强制代码测试。
   - 需确认命令、配置项、文件名、工作流名称与实际仓库一致。
   - 改动 AI 协作治理资产时，执行 `python scripts/check_ai_assets.py`。
-
 - 工作流 / 脚本 / Docker 改动：
+
   - 适用范围：`.github/**`、`scripts/**`、`docker/**`
   - 运行最接近改动面的本地验证。
   - 交付时说明影响了哪条流水线、发布路径或部署路径。
   - 若未执行 Docker / GitHub Actions 相关验证，明确说明原因与潜在风险。
-
 - 网络或三方依赖相关改动：
+
   - 先跑离线或确定性检查。
   - 优先确认 timeout、retry、fallback、异常文案、降级路径是否仍然成立。
   - 若未执行在线验证，必须明确写出原因。
@@ -186,23 +196,24 @@ gh run view <run_id> --log-failed
 ## 7. 稳定性护栏
 
 - 配置与运行入口：
+
   - 修改 `.env` 语义、默认值、CLI 参数、服务启动方式、调度语义时，要同时评估本地运行、Docker、GitHub Actions、API、Web、Desktop 的影响。
   - 新配置优先做到“不配置也可运行，配置后增强能力”，避免叠加开关和互斥模式。
-
 - 数据源与 fallback：
+
   - 修改 `data_provider/` 时，要关注数据源优先级、失败降级、字段标准化、缓存与超时策略。
   - 单一数据源失败不应拖垮整个分析流程，除非需求明确要求 fail-fast。
-
 - API / Web / Desktop 兼容：
+
   - 改 API / Schema / 认证 / 报告载荷时，要同时检查后端、Web、Desktop 的兼容性。
   - 默认优先追加字段、保留旧字段或提供兼容层，避免无提示破坏现有客户端。
-
 - 报告 / Prompt / 通知：
+
   - 修改报告结构、Prompt、提取器、通知模板、机器人链路时，要检查上游输入与下游消费方是否仍兼容。
   - 单一通知渠道失败不应拖垮整个分析主流程，除非需求明确要求 fail-fast。
   - 修改 `src/services/image_stock_extractor.py` 中 `EXTRACT_PROMPT` 时，要在 PR 描述中附完整最新 prompt。
-
 - 工作流 / 发布 / 打包：
+
   - 修改自动 tag、Release、Docker 发布、日常分析或桌面端打包流程时，要评估触发条件、产物路径、权限边界和回滚方式。
   - 自动 tag 默认保持 opt-in：只有 commit title 含 `#patch`、`#minor`、`#major` 才触发版本号更新，除非需求明确要求改变发布策略。
 

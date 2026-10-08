@@ -356,6 +356,55 @@ def get_no_data_text(language: Optional[str]) -> str:
     return _NO_DATA_BY_LANGUAGE[normalize_report_language(language)]
 
 
+# Currency unit per market. Falling back to CNY keeps legacy A-share output unchanged.
+_CURRENCY_UNIT_BY_LANGUAGE: Dict[str, Dict[str, str]] = {
+    "zh": {"cn": "元", "hk": "港元", "us": "美元"},
+    "en": {"cn": "CNY", "hk": "HKD", "us": "USD"},
+}
+
+# Magnitude thresholds (threshold, prefix), matched from largest to smallest.
+_MAGNITUDE_BY_LANGUAGE: Dict[str, tuple] = {
+    "zh": ((1e8, "亿"), (1e4, "万")),
+    "en": ((1e9, "B"), (1e6, "M"), (1e3, "K")),
+}
+
+_DEFAULT_CURRENCY_MARKET = "cn"
+
+
+def get_currency_unit(market: Optional[str], language: Optional[str] = "zh") -> str:
+    """Return the localized currency unit for a market ('cn' / 'hk' / 'us')."""
+    lang = normalize_report_language(language)
+    units = _CURRENCY_UNIT_BY_LANGUAGE[lang]
+    market_key = str(market or "").strip().lower()
+    return units.get(market_key) or units[_DEFAULT_CURRENCY_MARKET]
+
+
+def format_currency_amount(
+    amount: Any,
+    market: Optional[str] = None,
+    language: Optional[str] = "zh",
+) -> str:
+    """Format a money amount (turnover / market cap) with market-aware currency.
+
+    A-share keeps the historical '元 / 万元 / 亿元' wording; HK and US stocks
+    use their own currency instead of being labelled as CNY.
+    """
+    if amount is None:
+        return "N/A"
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return "N/A"
+
+    lang = normalize_report_language(language)
+    unit = get_currency_unit(market, lang)
+    for threshold, prefix in _MAGNITUDE_BY_LANGUAGE[lang]:
+        if abs(value) >= threshold:
+            scaled = value / threshold
+            return f"{scaled:.2f}{prefix} {unit}" if lang == "en" else f"{scaled:.2f} {prefix}{unit}"
+    return f"{value:.0f} {unit}"
+
+
 def _normalize_lookup_key(value: Any) -> str:
     return str(value or "").strip().lower().replace("_", " ").replace("-", " ")
 

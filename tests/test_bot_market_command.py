@@ -111,6 +111,19 @@ class MarketCommandRegionFilterTestCase(unittest.TestCase):
         kwargs = market_review_module.run_market_review.call_args.kwargs
         self.assertEqual(kwargs.get("override_region"), "cn,hk")
 
+    def test_hk_us_subset_open_passes_override_region_hk_us(self) -> None:
+        notifier, market_review_module = self._patch_dependencies(
+            market_review_region="hk,us",
+            open_markets={"hk", "us"},
+        )
+
+        cmd = MarketCommand()
+        cmd._run_market_review(_make_message())
+
+        market_review_module.run_market_review.assert_called_once()
+        kwargs = market_review_module.run_market_review.call_args.kwargs
+        self.assertEqual(kwargs.get("override_region"), "hk,us")
+
     def test_all_relevant_markets_closed_skips_review(self) -> None:
         """If compute_effective_region returns '', skip review and notify."""
         notifier, market_review_module = self._patch_dependencies(

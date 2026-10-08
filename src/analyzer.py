@@ -35,6 +35,8 @@ from src.config import (
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.report_language import (
+    format_currency_amount,
+    get_currency_unit,
     get_signal_level,
     get_no_data_text,
     get_placeholder_text,
@@ -1624,7 +1626,9 @@ class GeminiAnalyzer:
                 result = self._parse_response(response_text, code, name)
                 result.raw_response = response_text
                 result.search_performed = bool(news_context)
-                result.market_snapshot = self._build_market_snapshot(context)
+                result.market_snapshot = self._build_market_snapshot(
+                    context, report_language=report_language
+                )
                 result.model_used = model_used
                 result.report_language = report_language
 
@@ -1712,6 +1716,9 @@ class GeminiAnalyzer:
         today = context.get('today', {})
         unknown_text = get_unknown_text(report_language)
         no_data_text = get_no_data_text(report_language)
+        # 价格/成交额单位按市场取币种，避免港股、美股被标注成人民币
+        market = self._resolve_market(code)
+        currency_unit = self._format_currency_unit(market, report_language)
         
         # ========== 构建决策仪表盘格式的输入 ==========
         prompt = f"""# 决策仪表盘分析请求
@@ -1730,13 +1737,13 @@ class GeminiAnalyzer:
 ### 今日行情
 | 指标 | 数值 |
 |------|------|
-| 收盘价 | {today.get('close', 'N/A')} 元 |
-| 开盘价 | {today.get('open', 'N/A')} 元 |
-| 最高价 | {today.get('high', 'N/A')} 元 |
-| 最低价 | {today.get('low', 'N/A')} 元 |
+| 收盘价 | {today.get('close', 'N/A')} {currency_unit} |
+| 开盘价 | {today.get('open', 'N/A')} {currency_unit} |
+| 最高价 | {today.get('high', 'N/A')} {currency_unit} |
+| 最低价 | {today.get('low', 'N/A')} {currency_unit} |
 | 涨跌幅 | {today.get('pct_chg', 'N/A')}% |
 | 成交量 | {self._format_volume(today.get('volume'))} |
-| 成交额 | {self._format_amount(today.get('amount'))} |
+| 成交额 | {self._format_amount(today.get('amount'), market, report_language)} |
 
 ### 均线系统（关键判断指标）
 | 均线 | 数值 | 说明 |
@@ -1754,13 +1761,13 @@ class GeminiAnalyzer:
 ### 实时行情增强数据
 | 指标 | 数值 | 解读 |
 |------|------|------|
-| 当前价格 | {rt.get('price', 'N/A')} 元 | |
+| 当前价格 | {rt.get('price', 'N/A')} {currency_unit} | |
 | **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
 | **换手率** | **{rt.get('turnover_rate', 'N/A')}%** | |
 | 市盈率(动态) | {rt.get('pe_ratio', 'N/A')} | |
 | 市净率 | {rt.get('pb_ratio', 'N/A')} | |
-| 总市值 | {self._format_amount(rt.get('total_mv'))} | |
-| 流通市值 | {self._format_amount(rt.get('circ_mv'))} | |
+| 总市值 | {self._format_amount(rt.get('total_mv'), market, report_language)} | |
+| 流通市值 | {self._format_amount(rt.get('circ_mv'), market, report_language)} | |
 | 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
 """
 
@@ -2046,16 +2053,30 @@ class GeminiAnalyzer:
         else:
             return f"{volume:.0f} 股"
     
-    def _format_amount(self, amount: Optional[float]) -> str:
-        """格式化成交额显示"""
-        if amount is None:
-            return 'N/A'
-        if amount >= 1e8:
-            return f"{amount / 1e8:.2f} 亿元"
-        elif amount >= 1e4:
-            return f"{amount / 1e4:.2f} 万元"
-        else:
-            return f"{amount:.0f} 元"
+    @staticmethod
+    def _resolve_market(code: Optional[str]) -> Optional[str]:
+        """推断股票所属市场（cn / hk / us），失败返回 None（按 A 股兜底）。"""
+        if not code:
+            return None
+        try:
+            from src.core.trading_calendar import get_market_for_stock
+
+            return get_market_for_stock(str(code))
+        except Exception:  # pragma: no cover - defensive branch
+            return None
+
+    def _format_amount(
+        self,
+        amount: Optional[float],
+        market: Optional[str] = None,
+        report_language: str = "zh",
+    ) -> str:
+        """格式化成交额/市值显示（按市场使用对应币种）"""
+        return format_currency_amount(amount, market=market, language=report_language)
+
+    def _format_currency_unit(self, market: Optional[str], report_language: str = "zh") -> str:
+        """返回价格类字段的币种单位（A股元 / 港股港元 / 美股美元）"""
+        return get_currency_unit(market, report_language)
 
     def _format_percent(self, value: Optional[float]) -> str:
         """格式化百分比显示"""
@@ -2075,11 +2096,16 @@ class GeminiAnalyzer:
         except (TypeError, ValueError):
             return 'N/A'
 
-    def _build_market_snapshot(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_market_snapshot(
+        self,
+        context: Dict[str, Any],
+        report_language: str = "zh",
+    ) -> Dict[str, Any]:
         """构建当日行情快照（展示用）"""
         today = context.get('today', {}) or {}
         realtime = context.get('realtime', {}) or {}
         yesterday = context.get('yesterday', {}) or {}
+        market = self._resolve_market(context.get('code'))
 
         prev_close = yesterday.get('close')
         close = today.get('close')
@@ -2110,7 +2136,7 @@ class GeminiAnalyzer:
             "change_amount": self._format_price(change_amount),
             "amplitude": self._format_percent(amplitude),
             "volume": self._format_volume(today.get('volume')),
-            "amount": self._format_amount(today.get('amount')),
+            "amount": self._format_amount(today.get('amount'), market, report_language),
         }
 
         if realtime:

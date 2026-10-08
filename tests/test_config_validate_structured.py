@@ -486,6 +486,32 @@ class TestVisionKeyValidation:
 # Env alias compatibility
 # ---------------------------------------------------------------------------
 
+class TestMarketReviewRegionParsing:
+    def test_single_values_pass_through(self):
+        for value in ("cn", "hk", "us", "both"):
+            assert Config._parse_market_review_region(value) == value
+
+    def test_case_and_whitespace_normalized(self):
+        assert Config._parse_market_review_region(" HK ") == "hk"
+
+    def test_comma_subset_is_accepted_and_normalized(self):
+        assert Config._parse_market_review_region("hk,us") == "hk,us"
+        assert Config._parse_market_review_region("us,hk") == "hk,us"
+        assert Config._parse_market_review_region("cn,us") == "cn,us"
+
+    def test_comma_subset_deduplicates(self):
+        assert Config._parse_market_review_region("us,us,hk") == "hk,us"
+
+    def test_slash_separator_is_invalid_and_falls_back_to_cn(self):
+        assert Config._parse_market_review_region("hk/us") == "cn"
+
+    def test_unknown_token_in_subset_falls_back_to_cn(self):
+        assert Config._parse_market_review_region("hk,xx") == "cn"
+
+    def test_empty_falls_back_to_cn(self):
+        assert Config._parse_market_review_region("") == "cn"
+
+
 class TestEnvAliasCompatibility:
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

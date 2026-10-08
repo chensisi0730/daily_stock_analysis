@@ -24,6 +24,8 @@ class MarketStrategyBlueprint:
     principles: List[str]
     dimensions: List[StrategyDimension]
     action_framework: List[str]
+    # 蓝图内容语言（"zh"/"en"），用于决定模板章节标题等固定文案
+    language: str = "zh"
 
     def to_prompt_block(self) -> str:
         """Render blueprint as prompt instructions."""
@@ -47,7 +49,7 @@ class MarketStrategyBlueprint:
     def to_markdown_block(self) -> str:
         """Render blueprint as markdown section for template fallback report."""
         dims = "\n".join([f"- **{dim.name}**: {dim.objective}" for dim in self.dimensions])
-        section_title = "### VI. Strategy Framework" if self.region == "us" else "### 六、策略框架"
+        section_title = "### VI. Strategy Framework" if self.language == "en" else "### 六、策略框架"
         return f"{section_title}\n{dims}\n"
 
 
@@ -86,6 +88,7 @@ CN_BLUEPRINT = MarketStrategyBlueprint(
 
 US_BLUEPRINT = MarketStrategyBlueprint(
     region="us",
+    language="en",
     title="US Market Regime Strategy",
     positioning="Focus on index trend, macro narrative, and sector rotation to define next-session risk posture.",
     principles=[
@@ -129,6 +132,52 @@ US_BLUEPRINT = MarketStrategyBlueprint(
     ],
 )
 
+# 美股蓝图的中文版（REPORT_LANGUAGE=zh 时使用），内容与 US_BLUEPRINT 一一对应
+US_BLUEPRINT_ZH = MarketStrategyBlueprint(
+    region="us",
+    title="美股市场 Regime 复盘策略",
+    positioning="聚焦指数趋势、宏观叙事与板块轮动，形成次日风险偏好判断。",
+    principles=[
+        "先从标普500、纳斯达克、道指的共振判断市场状态（Regime）。",
+        "区分 beta 普涨普跌与主题驱动的 alpha 轮动。",
+        "把复盘转化为可执行的 risk-on/risk-off 立场，并给出明确失效条件。",
+    ],
+    dimensions=[
+        StrategyDimension(
+            name="趋势状态",
+            objective="判断市场处于动量、震荡还是 risk-off 阶段。",
+            checkpoints=[
+                "SPX/NDX/DJI 是否同向",
+                "成交量是否确认走势",
+                "关键指数点位是否收复或失守",
+            ],
+        ),
+        StrategyDimension(
+            name="宏观与资金",
+            objective="把政策/利率叙事映射到股票风险偏好。",
+            checkpoints=[
+                "美债收益率与美元的含义",
+                "市场宽度与领涨集中度",
+                "防御与成长因子轮动",
+            ],
+        ),
+        StrategyDimension(
+            name="板块主题",
+            objective="识别持续领涨方向与脆弱板块。",
+            checkpoints=[
+                "AI/半导体/软件的趋势持续性",
+                "能源/金融对宏观数据的敏感度",
+                "VIX 与大型股财报的波动信号",
+            ],
+        ),
+    ],
+    action_framework=[
+        "Risk-on：指数普涨突破且参与面扩大。",
+        "Neutral：指数信号混杂，聚焦局部相对强势。",
+        "Risk-off：突破失败且波动率上升，优先保住本金。",
+    ],
+)
+
 HK_BLUEPRINT = MarketStrategyBlueprint(
     region="hk",
     title="港股市场三段式复盘策略",
@@ -163,10 +212,14 @@ HK_BLUEPRINT = MarketStrategyBlueprint(
 )
 
 
-def get_market_strategy_blueprint(region: str) -> MarketStrategyBlueprint:
-    """Return strategy blueprint by market region."""
+def get_market_strategy_blueprint(region: str, language: str = "zh") -> MarketStrategyBlueprint:
+    """Return strategy blueprint by market region and report language.
+
+    美股蓝图内置中英文两个版本，按报告语言选择；A 股/港股蓝图本身为中文，
+    英文场景由 MarketAnalyzer 使用内置英文文案覆盖。
+    """
     if region == "us":
-        return US_BLUEPRINT
+        return US_BLUEPRINT if language == "en" else US_BLUEPRINT_ZH
     if region == "hk":
         return HK_BLUEPRINT
     return CN_BLUEPRINT

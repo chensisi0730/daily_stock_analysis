@@ -50,6 +50,7 @@ from src.search_service import (
     AnspireSearchProvider,
     SearchService,
     get_search_service,
+    reset_disabled_keys_cache,
     reset_search_service,
 )
 
@@ -134,6 +135,8 @@ class TestAnspireSearchProvider(unittest.TestCase):
     
     def setUp(self):
         """测试前准备"""
+        # 清空持久化的禁用 key 缓存：否则上一次运行留下的结论会让本用例的 key 一上来就不可用
+        reset_disabled_keys_cache()
         # ✅ 使用明确的测试占位符，不是真实密钥形态
         self.test_api_key = "sk-test-anspire-placeholder-key-12345"
         self.provider = AnspireSearchProvider([self.test_api_key])

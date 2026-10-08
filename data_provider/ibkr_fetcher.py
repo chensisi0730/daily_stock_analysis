@@ -131,7 +131,7 @@ class IbkrFetcher(BaseFetcher):
             "request_timeout": _parse_env_float("IBKR_REQUEST_TIMEOUT", 30.0),
         }
 
-    _next_client_id = 1000
+    _next_client_id = 1000  # 自动分配的 clientId 起始值
 
     @property
     def priority(self) -> int:
@@ -151,6 +151,35 @@ class IbkrFetcher(BaseFetcher):
             return False
         return True
 
+    @classmethod
+    def _auto_increment_client_id(cls) -> int:
+        """当 clientId 冲突时，自动分配一个新的唯一 ID。
+
+        TWS/Gateway 每个连接需要唯一的 clientId，
+        多实例运行时容易冲突。此方法自动递增避免冲突。
+        """
+        with cls._lock if hasattr(cls, '_lock') else threading.Lock():
+            new_id = cls._next_client_id
+            cls._next_client_id += 1
+        return new_id
+
+    @staticmethod
+    def _ensure_event_loop() -> None:
+        """确保当前线程有 asyncio 事件循环（ib_insync 依赖）。
+
+        ThreadPoolExecutor 的工作线程默认没有事件循环，
+        导致 ib_insync.IB() 抛出 "no current event loop"。
+        此方法在 _connect 前调用，按需创建并设置事件循环。
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed loop")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
     def _connect(self) -> Optional[Any]:
         with self._lock:
             if self._ib is not None and self._ib.isConnected():
@@ -159,28 +188,64 @@ class IbkrFetcher(BaseFetcher):
             if not self._is_available():
                 return None
 
+            # ib_insync 需要 asyncio 事件循环，线程池中可能没有
+            self._ensure_event_loop()
+
             cfg = self._config
-            try:
-                ib = ib_insync.IB()
-                ib.connect(
-                    host=cfg["host"],
-                    port=cfg["port"],
-                    clientId=cfg["client_id"],
-                    timeout=cfg["connect_timeout"],
-                )
-                self._ib = ib
-                logger.info(
-                    "[IBKR] 连接成功: %s:%s (clientId=%s, version=%s)",
-                    cfg["host"],
-                    cfg["port"],
-                    cfg["client_id"],
-                    _IB_INSYNC_VERSION,
-                )
-                return ib
-            except Exception as exc:
-                logger.warning("[IBKR] 连接失败 %s:%s: %s", cfg["host"], cfg["port"], exc)
-                self._ib = None
-                return None
+            client_id = cfg["client_id"]
+            max_retries = 3
+
+            for attempt in range(max_retries):
+                try:
+                    ib = ib_insync.IB()
+                    ib.connect(
+                        host=cfg["host"],
+                        port=cfg["port"],
+                        clientId=client_id,
+                        timeout=cfg["connect_timeout"],
+                    )
+                    self._ib = ib
+                    # 连接成功，记录使用的 clientId
+                    cfg["client_id"] = client_id
+                    logger.info(
+                        "[IBKR] 连接成功: %s:%s (clientId=%s, attempt=%d, version=%s)",
+                        cfg["host"],
+                        cfg["port"],
+                        client_id,
+                        attempt + 1,
+                        _IB_INSYNC_VERSION,
+                    )
+                    return ib
+                except Exception as exc:
+                    exc_msg = str(exc).lower()
+                    # clientId 冲突的典型表现：
+                    # 1. 明确的冲突错误信息（中/英文）
+                    # 2. ib_insync 在冲突后断连抛出 TimeoutError（消息为空）
+                    is_id_conflict = any(
+                        kw in exc_msg
+                        for kw in [
+                            "already connected", "client id", "clientid",
+                            "duplicate", "already in use",
+                            "已被使用", "客户号码", "客户号",
+                        ]
+                    )
+                    # ib_insync clientId 冲突时，异常消息为空的 TimeoutError
+                    is_empty_timeout = (not exc_msg or "timeout" in exc_msg) and attempt == 0
+
+                    if (is_id_conflict or is_empty_timeout) and attempt < max_retries - 1:
+                        client_id = self._auto_increment_client_id()
+                        logger.warning(
+                            "[IBKR] clientId 可能冲突（%s），自动切换到 clientId=%s (attempt=%d)",
+                            exc_msg or "empty timeout",
+                            client_id,
+                            attempt + 1,
+                        )
+                        # 等待旧连接完全断开
+                        time.sleep(1)
+                        continue
+                    logger.warning("[IBKR] 连接失败 %s:%s (clientId=%s): %s", cfg["host"], cfg["port"], client_id, exc)
+                    self._ib = None
+                    return None
 
     def _disconnect(self) -> None:
         with self._lock:
@@ -242,12 +307,12 @@ class IbkrFetcher(BaseFetcher):
             return None
 
         try:
+            # reqMktData(contract, genericTickList, snapshot, regulatorySnapshot)
             ticker = ib.reqMktData(
                 qualified,
-                "",
+                "101,104,106,254,258,259,260,261,262",
                 False,
                 False,
-                genericTickList="101,104,106,254,258,259,260,261,262",
             )
             ib.sleep(3)
 
@@ -506,14 +571,19 @@ class IbkrFetcher(BaseFetcher):
 
         rows = []
         for bar in bars:
+            bar_volume = int(bar.volume) if bar.volume else 0
+            # IBKR 日线 bar 的 average 是当日成交均价（VWAP），不是成交额。
+            # 成交额需折算为 成交量 × 均价，才能与 yfinance 等数据源的
+            # amount = volume * close 口径保持一致。
+            bar_average = safe_float(getattr(bar, "average", None))
             rows.append({
                 "date": str(bar.date),
                 "open": safe_float(bar.open),
                 "high": safe_float(bar.high),
                 "low": safe_float(bar.low),
                 "close": safe_float(bar.close),
-                "volume": int(bar.volume) if bar.volume else 0,
-                "amount": safe_float(getattr(bar, "average", None)),
+                "volume": bar_volume,
+                "amount": bar_volume * bar_average if bar_average is not None else 0.0,
             })
 
         df = pd.DataFrame(rows)

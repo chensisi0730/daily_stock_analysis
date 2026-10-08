@@ -19,7 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] Agent 模式未生成有效决策仪表盘时保留本地趋势分析的评分、趋势和操作建议，并将强买/强卖 fallback 归一到兼容的 `buy`/`sell` 决策类型，避免首页结果被 `50 / 观望 / 未知` 缺省值覆盖。
 - [修复] 持仓快照现价缺失时不再静默回退为持仓成本；当天快照优先使用历史收盘价，仅在缺失时使用实时价 fallback，缺价持仓不再污染市值与未实现盈亏汇总，并为持仓明细返回价格来源、日期、stale 与缺价状态。
 - [测试] 补齐 `task_queue` 轻量导入 stub 的股票代码规范化函数，恢复 `tests/test_task_queue_config_sync.py` 收集与运行。
+- [改进] `.env.example` LLM 渠道模板升级为三层优先级：`LLM_CHANNELS=local_qwen,cloud_qwen,deepseek`，局域网 Qwen 与云端中转 Qwen 同名模型组成 Router 模型组互为备份，两者都不可用时才降级 DeepSeek。
 - [修复] 分析 Prompt 在注入 `trend_analysis` 前按最终 `trend_status` / `ma_alignment` 清洗互斥理由：空头结构移除看多理由、多头结构移除空头结构风险，并在事件/技术冲突与异常放量（>10 倍）时强制提示“事件先行、技术待确认”与量能降权；本次仅改动 `src/analyzer.py` 的 Prompt 清洗辅助逻辑并补充 `tests/test_analyzer_news_prompt.py` 回归用例，未触及 `src/config.py`、LiteLLM/provider、模型名、Base URL 或运行时配置清理/迁移入口。
+- [改进] 大盘复盘 `MARKET_REVIEW_REGION` 支持逗号组合子集（如 `hk,us` / `cn,us`）：配置解析、交易日过滤与 Web 配置项选项同步放行，非法值仍回退 `cn`；同步修正 `.env.example` 中误用斜杠的非法示例值。
+- [修复] 美股大盘复盘跟随 `REPORT_LANGUAGE` 语言配置：默认 `zh` 时输出中文 Prompt/模板/策略蓝图（新增美股 Regime 策略中文版本），不再强制英文，消除多市场合并报告中“港股中文 + 美股英文”的混排。
+- [修复] 修正 `IbkrFetcher` 日线成交额：此前直接把 IBKR bar 的 `average`（当日成交均价 VWAP）当成成交额写入 `amount`，与 `volume * close` 口径相差上万倍（报告出现“成交额 230 元”）；现改为 `volume * average`，均价缺失时写 0.0。历史 IBKR 来源行的 `amount` 仍为均价，需重抓或单独订正。
+- [修复] 成交额、市值与价格类字段按市场显示币种：`src/report_language.py` 新增 `format_currency_amount()` / `get_currency_unit()`，A 股保持“元/万元/亿元”，港股显示港元、美股显示美元，英文报告使用 `HKD` / `USD` / `CNY` 与 B/M/K 量级；`GeminiAnalyzer` 的 Prompt 与行情快照按股票代码推断市场后取对应币种，并补充 `tests/test_report_language.py` 回归用例。
+- [修复] LLM 主模型推断优先级：`LLM_CHANNELS` 生效时主模型会被 legacy 单 key 推断抢占成已弃用的 `deepseek-chat`，与 Router 实际注册的模型不一致，导致每次调用先打一个不可用的主模型再降级；现改为未显式配置 `LITELLM_MODEL` 时以 channels 为准，并对“显式配置却不在已注册模型列表内”的情况输出告警。
+- [改进] 数据源熔断与可用性过滤：美股/港股路由跳过未配置凭据的数据源（如未填 key 的 Longbridge），连接型数据源（如 TWS 未启动的 IBKR）失败后进入 10 分钟冷却，同一轮任务不再反复等待连接超时；实时行情链路同步跳过熔断中的数据源。
+- [修复] 筹码分布按市场能力收敛：非 A 股个股直接跳过，Tushare 对美股/港股/ETF 的“不支持”提示由 WARNING 降为 DEBUG，美股不再刷“筹码分布所有数据源均失败”。
+- [改进] 搜索失效状态跨运行复用：余额不足/权限无效导致的 key 禁用会持久化到数据目录的 `search_disabled_keys.json`（仅存 key 指纹、TTL 12 小时），下次启动直接跳过该 key，不再每次运行重复失败一次；SearXNG 失败实例加入 10 分钟黑名单，不再反复命中同一批坏节点；社交情绪数据源返回 404（标的无数据）由 WARNING 降为 DEBUG。
+- [修复] 搜索请求遵循项目代理开关：`USE_PROXY=false`（项目直连）时搜索 API 请求显式绕过 shell 的 `HTTP_PROXY`/`HTTPS_PROXY`，避免本机代理抖动导致 SerpAPI/Tavily 整体失败；`SearXNG` 的 searx.space 列表拉取与公共实例请求保留原代理行为（这些目标通常只在代理下可达），避免修完 API 后公共实例发现反而失效。
+- [修复] 大盘指数获取卡死整条流水线：`get_main_indices()` 对每个数据源调用加墙钟超时保护（`FETCHER_CALL_TIMEOUT`，默认 30 秒），yfinance 单 ticker 拉取另有独立超时（`YFINANCE_TICKER_TIMEOUT`，默认 20 秒）。此前港股指数在拉完 `^HSI` 后可能静默阻塞 30 分钟且无任何日志；超时后该数据源按失败处理并降级到下一个。
+- [改进] yfinance 限流应对：新增全局最小请求间隔控制（`YFINANCE_MIN_INTERVAL`，默认 3 秒）与请求前随机延迟；Yahoo 返回空 DataFrame 或抛限流异常时转为可重试错误，重试退避由 `multiplier=1/2~30s` 调整为 `multiplier=2/5~60s`。
+- [新功能] 国际市场代码路由：支持韩股 `.KS`、台股 `.TW`、新加坡 `.SI`、加拿大 `.TO`、澳洲 `.AX`、伦敦 `.L` 后缀代码，统一走 yfinance 路由，不再误落到 A 股/美股/港股分支。
+- [改进] 数据源配额耗尽自动降级：命中 `RateLimitError` 或配额类错误后将该数据源优先级降至 99，同一轮任务后续标的优先走其它数据源，减少在同一配额耗尽的源上反复等待。
+- [修复] 熔断器雪崩式误熔断：阈值由 1 次放宽为 3 次连续失败、冷却由 600 秒缩短为 120 秒（`FETCHER_CIRCUIT_THRESHOLD` / `FETCHER_CIRCUIT_COOLDOWN`）。此前单次网络抖动（DNS 解析失败、代理断连）即触发熔断，导致本可正常取数的 yfinance 被整体跳过，后续 UMC/PLTR/INTC/CRWV/AAPL/TSLA 连续取数失败。
+- [修复] 配额降级此前只改写 `fetcher.priority` 却未重排数据源列表，而 `_get_fetchers_snapshot()` 返回的是已排序列表的浅拷贝，导致降级完全不生效（每个标的仍先打配额耗尽的源，且重复刷降级日志）。现改为降级时同步重排并保证幂等。
+- [修复] 通用数据源循环（A 股/港股路径）补齐凭据检查与熔断跳过，并接入熔断状态上报：此前未配置 Longbridge 凭据时每只港股都白跑一次并刷 `QuoteContext not available`，连接型坏源也不会被熔断器记住。
+- [测试] 新增 `tests/test_data_provider_resilience.py`（36 例）：覆盖 `call_with_timeout` 的返回值/异常/超时/daemon 语义、熔断阈值与冷却过期与成功复位、单次瞬时失败不触发级联跳过、通用循环凭据过滤与熔断跳过、配额降级重排与幂等、国际市场后缀路由、筹码分布市场门槛、指数获取超时快速降级。
 
 ## [3.14.1] - 2026-04-26
 - [测试] 修正大盘复盘 prompt 测试对“明日交易计划”标题的断言，并同步桌面端版本号，恢复发布 gate。

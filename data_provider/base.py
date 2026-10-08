@@ -15,6 +15,7 @@
 """
 
 import logging
+import os
 import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
@@ -30,6 +31,41 @@ from .fundamental_adapter import AkshareFundamentalAdapter
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+# 单个数据源调用的兜底超时（秒）。第三方 SDK（yfinance / akshare 等）内部偶发
+# 长时间无响应且没有严格超时，缺了这层保护会拖垮整条流水线。
+FETCHER_CALL_TIMEOUT_SECONDS = float(os.getenv("FETCHER_CALL_TIMEOUT", "30"))
+YFINANCE_TICKER_TIMEOUT_SECONDS = float(os.getenv("YFINANCE_TICKER_TIMEOUT", "20"))
+
+# 熔断器参数。阈值不能为 1，冷却也不宜过长：单次网络抖动不应把可用的数据源
+# 整体摘掉（详见 DataFetcherManager.FETCHER_CIRCUIT_THRESHOLD 注释）。
+FETCHER_CIRCUIT_THRESHOLD_DEFAULT = int(os.getenv("FETCHER_CIRCUIT_THRESHOLD", "3"))
+FETCHER_CIRCUIT_COOLDOWN_DEFAULT = float(os.getenv("FETCHER_CIRCUIT_COOLDOWN", "120"))
+
+
+def call_with_timeout(func: Callable, *, timeout: float, **kwargs) -> Any:
+    """Run a data-source call in a daemon thread with a hard wall-clock limit.
+
+    The worker is a daemon thread: on timeout we stop waiting, but the hung call
+    keeps running in the background instead of being force-killed (not possible
+    for threads in CPython). It therefore cannot block process shutdown.
+    """
+    box: Dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            box["data"] = func(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - re-raised in the caller thread
+            box["error"] = exc
+
+    worker = Thread(target=_runner, name="fetcher-call", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"数据源调用超过 {timeout:.0f}s 未返回")
+    if "error" in box:
+        raise box["error"]
+    return box.get("data")
 
 
 # === 标准化列名定义 ===
@@ -106,12 +142,16 @@ def normalize_stock_code(stock_code: str) -> str:
             return candidate
 
     # Strip .SH/.SZ/.BJ suffix (e.g. 600519.SH -> 600519, 920748.BJ -> 920748)
+    # Preserve international market suffixes (.KS, .TW, .SI, .TO, .AX, .L) for yfinance
     if '.' in code:
         base, suffix = code.rsplit('.', 1)
         if suffix.upper() == 'HK' and base.isdigit() and 1 <= len(base) <= 5:
             return f"HK{base.zfill(5)}"
         if suffix.upper() in ('SH', 'SZ', 'SS', 'BJ') and base.isdigit():
             return base
+        # International market suffixes: keep as-is for downstream fetchers
+        if suffix.upper() in ('KS', 'TW', 'SI', 'TO', 'AX', 'L'):
+            return code
 
     return code
 
@@ -155,12 +195,24 @@ def _is_etf_code(code: str) -> bool:
     )
 
 
+def _is_international_market(code: str) -> bool:
+    """判断是否为国际市场代码（韩股 .KS、台股 .TW、新加坡 .SI 等）。
+
+    这些市场仅 yfinance 支持，需走专用路由。
+    """
+    normalized = (code or "").strip().upper()
+    international_suffixes = ('.KS', '.TW', '.SI', '.TO', '.AX', '.L')
+    return any(normalized.endswith(suffix) for suffix in international_suffixes)
+
+
 def _market_tag(code: str) -> str:
-    """返回市场标签: cn/us/hk."""
+    """返回市场标签: cn/us/hk/intl."""
     if _is_us_market(code):
         return "us"
     if _is_hk_market(code):
         return "hk"
+    if _is_international_market(code):
+        return "intl"
     return "cn"
 
 
@@ -511,6 +563,95 @@ class DataFetcherManager:
         self._fundamental_cache_lock = RLock()
         self._fundamental_timeout_worker_limit = 8
         self._fundamental_timeout_slots = BoundedSemaphore(self._fundamental_timeout_worker_limit)
+        # 数据源熔断状态（进程内）：连接型数据源（如 IBKR）连续失败后短期跳过，
+        # 避免同一轮任务里每次取数都重走一遍连接超时。
+        self._fetcher_failure_streak: Dict[str, int] = {}
+        self._fetcher_circuit_until: Dict[str, float] = {}
+        self._fetcher_circuit_lock = RLock()
+
+    # 触发熔断所需的**连续**失败次数。
+    # 不能设为 1：单次网络抖动（DNS 解析失败、代理断连）会被误判为数据源永久损坏，
+    # 一旦熔断该源在冷却期内被整体跳过，连本可成功的数据源也会雪崩式失败。
+    # 连接型数据源（TWS 未启动等）失败通常是快速失败，多试几次代价很低。
+    FETCHER_CIRCUIT_THRESHOLD = FETCHER_CIRCUIT_THRESHOLD_DEFAULT
+    FETCHER_CIRCUIT_COOLDOWN_SEC = FETCHER_CIRCUIT_COOLDOWN_DEFAULT
+    # 配额耗尽的数据源被降级到的优先级（低于所有正常数据源）
+    QUOTA_DEMOTED_PRIORITY = 99
+
+    def _record_fetcher_success(self, fetcher_name: str) -> None:
+        """Clear circuit-breaker state after a successful fetch."""
+        self._ensure_concurrency_guards()
+        with self._fetcher_circuit_lock:
+            self._fetcher_failure_streak.pop(fetcher_name, None)
+            self._fetcher_circuit_until.pop(fetcher_name, None)
+
+    def _record_fetcher_failure(self, fetcher_name: str) -> None:
+        """Count a fetcher failure and open the circuit once the threshold is hit."""
+        self._ensure_concurrency_guards()
+        with self._fetcher_circuit_lock:
+            streak = self._fetcher_failure_streak.get(fetcher_name, 0) + 1
+            self._fetcher_failure_streak[fetcher_name] = streak
+            if streak >= self.FETCHER_CIRCUIT_THRESHOLD:
+                self._fetcher_circuit_until[fetcher_name] = (
+                    time.time() + self.FETCHER_CIRCUIT_COOLDOWN_SEC
+                )
+                logger.warning(
+                    "[数据源熔断] %s 连续失败 %d 次，%.0f 秒内跳过该数据源",
+                    fetcher_name,
+                    streak,
+                    self.FETCHER_CIRCUIT_COOLDOWN_SEC,
+                )
+
+    def _is_fetcher_circuit_open(self, fetcher_name: str) -> bool:
+        """Return True when a fetcher is inside its circuit-breaker cooldown."""
+        self._ensure_concurrency_guards()
+        with self._fetcher_circuit_lock:
+            until = self._fetcher_circuit_until.get(fetcher_name)
+            if until is None:
+                return False
+            if time.time() >= until:
+                # 冷却结束，清掉状态让下一次请求做一次探测
+                self._fetcher_circuit_until.pop(fetcher_name, None)
+                self._fetcher_failure_streak.pop(fetcher_name, None)
+                return False
+            return True
+
+    def _demote_fetcher_priority(self, fetcher: BaseFetcher, stock_code: str) -> None:
+        """Sink a quota-exhausted fetcher to the bottom of the routing order.
+
+        Setting ``fetcher.priority`` alone is not enough: ``_get_fetchers_snapshot()``
+        returns a plain ``list()`` copy of the stored order, which is only sorted at
+        init / ``add_fetcher`` time. The stored list must be re-sorted here as well,
+        otherwise later tickers keep hitting the exhausted source first.
+        """
+        self._ensure_concurrency_guards()
+        old_priority = fetcher.priority
+        if old_priority >= self.QUOTA_DEMOTED_PRIORITY:
+            return
+        fetcher.priority = self.QUOTA_DEMOTED_PRIORITY
+        with self._fetchers_lock:
+            self._fetchers.sort(key=lambda f: f.priority)
+        logger.warning(
+            "[数据源降级] %s: [%s] 遇到配额限制，优先级从 %s 降至 %s",
+            stock_code,
+            fetcher.name,
+            old_priority,
+            self.QUOTA_DEMOTED_PRIORITY,
+        )
+
+    def _is_fetcher_available(self, fetcher_name: str) -> bool:
+        """Return True when a fetcher declares itself usable (credentials/config present)."""
+        for f in self._get_fetchers_snapshot():
+            if f.name != fetcher_name:
+                continue
+            checker = getattr(f, "_is_available", None)
+            if not callable(checker):
+                return True
+            try:
+                return bool(checker())
+            except Exception:  # pragma: no cover - defensive branch
+                return False
+        return False
 
     def _ensure_concurrency_guards(self) -> None:
         """Lazily initialize thread-safety primitives for test scaffolds using __new__."""
@@ -524,6 +665,12 @@ class DataFetcherManager:
             self._stock_name_cache = {}
         if not hasattr(self, "_stock_name_cache_lock") or self._stock_name_cache_lock is None:
             self._stock_name_cache_lock = RLock()
+        if not hasattr(self, "_fetcher_circuit_lock") or self._fetcher_circuit_lock is None:
+            self._fetcher_circuit_lock = RLock()
+        if not hasattr(self, "_fetcher_failure_streak") or self._fetcher_failure_streak is None:
+            self._fetcher_failure_streak = {}
+        if not hasattr(self, "_fetcher_circuit_until") or self._fetcher_circuit_until is None:
+            self._fetcher_circuit_until = {}
 
     def _get_fetchers_snapshot(self) -> List[BaseFetcher]:
         self._ensure_concurrency_guards()
@@ -961,11 +1108,19 @@ class DataFetcherManager:
                 source_order = ["LongbridgeFetcher", "YfinanceFetcher"]
             else:
                 source_order = ["YfinanceFetcher", "LongbridgeFetcher"]
+            # 未配置凭据的数据源（如未填 key 的 Longbridge）不再进入路由，
+            # 避免每次取数都白跑一次并刷一条失败日志
+            source_order = [name for name in source_order if self._is_fetcher_available(name)]
             market_label = "美股指数" if is_us_index else "美股"
 
             for src_name in source_order:
                 for attempt, fetcher in enumerate(fetchers, start=1):
                     if fetcher.name != src_name:
+                        continue
+                    if self._is_fetcher_circuit_open(src_name):
+                        logger.info(
+                            f"[数据源跳过] [{fetcher.name}] 处于熔断冷却期，跳过 {market_label} {stock_code}"
+                        )
                         continue
                     try:
                         role = "首选" if src_name == source_order[0] else "兜底"
@@ -987,6 +1142,7 @@ class DataFetcherManager:
                                 f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "
                                 f"rows={len(df)}, elapsed={elapsed:.2f}s"
                             )
+                            self._record_fetcher_success(fetcher.name)
                             return df, fetcher.name
                     except Exception as e:
                         error_type, error_reason = summarize_exception(e)
@@ -996,6 +1152,7 @@ class DataFetcherManager:
                             f"error_type={error_type}, reason={error_reason}"
                         )
                         errors.append(error_msg)
+                        self._record_fetcher_failure(fetcher.name)
                     break
 
             error_summary = f"{market_label} {stock_code} 获取失败:\n" + "\n".join(errors)
@@ -1003,7 +1160,60 @@ class DataFetcherManager:
             logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
             raise DataFetchError(error_summary)
 
+        # 国际市场（韩股 .KS、台股 .TW 等）：仅 yfinance 支持，直接路由
+        is_intl = _is_international_market(stock_code)
+        if is_intl:
+            for attempt, fetcher in enumerate(fetchers, start=1):
+                if fetcher.name != "YfinanceFetcher":
+                    continue
+                try:
+                    logger.info(
+                        f"[数据源尝试 {attempt}/{total_fetchers}] [{fetcher.name}] "
+                        f"国际市场 {stock_code} 路由..."
+                    )
+                    df = self._call_fetcher_method(
+                        fetcher,
+                        "get_daily_data",
+                        stock_code=stock_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        days=days,
+                    )
+                    if df is not None and not df.empty:
+                        elapsed = time.time() - request_start
+                        logger.info(
+                            f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "
+                            f"rows={len(df)}, elapsed={elapsed:.2f}s"
+                        )
+                        return df, fetcher.name
+                except Exception as e:
+                    error_type, error_reason = summarize_exception(e)
+                    error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
+                    logger.warning(
+                        f"[数据源失败 {attempt}/{total_fetchers}] [{fetcher.name}] {stock_code}: "
+                        f"error_type={error_type}, reason={error_reason}"
+                    )
+                    errors.append(error_msg)
+                break
+
+            error_summary = f"国际市场 {stock_code} 获取失败:\n" + "\n".join(errors)
+            elapsed = time.time() - request_start
+            logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
+            raise DataFetchError(error_summary)
+
         for attempt, fetcher in enumerate(fetchers, start=1):
+            # 未配置凭据的数据源直接跳过：与其白跑一次并刷一条失败日志，
+            # 不如一开始就排除（Longbridge 未填 key 时属于这种情况）。
+            if not self._is_fetcher_available(fetcher.name):
+                logger.info(
+                    f"[数据源跳过] [{fetcher.name}] 未配置凭据，跳过 {stock_code}"
+                )
+                continue
+            if self._is_fetcher_circuit_open(fetcher.name):
+                logger.info(
+                    f"[数据源跳过] [{fetcher.name}] 处于熔断冷却期，跳过 {stock_code}"
+                )
+                continue
             try:
                 logger.info(f"[数据源尝试 {attempt}/{total_fetchers}] [{fetcher.name}] 获取 {stock_code}...")
                 df = self._call_fetcher_method(
@@ -1021,8 +1231,9 @@ class DataFetcherManager:
                         f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "
                         f"rows={len(df)}, elapsed={elapsed:.2f}s"
                     )
+                    self._record_fetcher_success(fetcher.name)
                     return df, fetcher.name
-                    
+
             except Exception as e:
                 error_type, error_reason = summarize_exception(e)
                 error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
@@ -1031,6 +1242,10 @@ class DataFetcherManager:
                     f"error_type={error_type}, reason={error_reason}"
                 )
                 errors.append(error_msg)
+                self._record_fetcher_failure(fetcher.name)
+                # 配额/限流错误：自动降低该数据源优先级，避免后续请求重复等待
+                if isinstance(e, RateLimitError) or "配额" in error_reason or "quota" in error_reason.lower():
+                    self._demote_fetcher_priority(fetcher, stock_code)
                 if attempt < total_fetchers:
                     next_fetcher = fetchers[attempt]
                     logger.info(f"[数据源切换] {stock_code}: [{fetcher.name}] -> [{next_fetcher.name}]")
@@ -1181,6 +1396,12 @@ class DataFetcherManager:
                 if prefer_ibkr:
                     primary_src = "IbkrFetcher"
                     secondary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
+                    # IBKR 处于熔断冷却期时直接用次选源，不必每次都等连接超时
+                    if self._is_fetcher_circuit_open(primary_src):
+                        logger.info(
+                            "[实时行情] %s 处于熔断冷却期，改用 %s", primary_src, secondary_src
+                        )
+                        primary_src = secondary_src
                 elif prefer_lb:
                     primary_src = "LongbridgeFetcher"
                     secondary_src = "YfinanceFetcher"
@@ -1197,12 +1418,17 @@ class DataFetcherManager:
                 primary_kw = {"source": "hk"} if primary_src == "AkshareFetcher" else {}
                 secondary_kw = {"source": "hk"} if secondary_src == "AkshareFetcher" else {}
 
+            # 未配置凭据的数据源不参与实时行情路由
+            if secondary_src and not self._is_fetcher_available(secondary_src):
+                secondary_src = None
+
             primary_quote = self._try_fetcher_quote(stock_code, primary_src, **primary_kw)
             if primary_quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
-            primary_quote = self._supplement_quote(
-                stock_code, primary_quote, secondary_src, **secondary_kw,
-            )
+            if secondary_src:
+                primary_quote = self._supplement_quote(
+                    stock_code, primary_quote, secondary_src, **secondary_kw,
+                )
             if primary_quote is not None:
                 return primary_quote
             if log_final_failure:
@@ -1434,6 +1660,12 @@ class DataFetcherManager:
 
         circuit_breaker = get_chip_circuit_breaker()
 
+        # 筹码分布目前只有 A 股口径：非 A 股个股（美股/港股/国际市场）没有可用数据源，
+        # 直接跳过，避免每只票都刷一条“所有数据源均失败”的噪声
+        if not (stock_code.isdigit() and len(stock_code) == 6):
+            logger.debug(f"[筹码分布] {stock_code} 非 A 股个股，暂无筹码数据源，跳过")
+            return None
+
         # 直接遍历管理器已经按 priority 排好序的数据源列表
         for fetcher in self._get_fetchers_snapshot():
             # 只处理实现了筹码分布逻辑的数据源
@@ -1651,19 +1883,32 @@ class DataFetcherManager:
             tickflow_fetcher = self._get_tickflow_fetcher()
             if tickflow_fetcher is not None:
                 try:
-                    data = tickflow_fetcher.get_main_indices(region=region)
+                    data = call_with_timeout(
+                        tickflow_fetcher.get_main_indices,
+                        timeout=FETCHER_CALL_TIMEOUT_SECONDS,
+                        region=region,
+                    )
                     if data:
                         logger.info("[TickFlowFetcher] 获取指数行情成功")
                         return data
+                except TimeoutError as e:
+                    logger.warning(f"[TickFlowFetcher] 获取指数行情超时: {e}")
                 except Exception as e:
                     logger.warning(f"[TickFlowFetcher] 获取指数行情失败: {e}")
 
         for fetcher in self._fetchers:
             try:
-                data = fetcher.get_main_indices(region=region)
+                data = call_with_timeout(
+                    fetcher.get_main_indices,
+                    timeout=FETCHER_CALL_TIMEOUT_SECONDS,
+                    region=region,
+                )
                 if data:
                     logger.info(f"[{fetcher.name}] 获取指数行情成功")
                     return data
+            except TimeoutError as e:
+                logger.warning(f"[{fetcher.name}] 获取指数行情超时（>{FETCHER_CALL_TIMEOUT_SECONDS:.1f}s）: {e}")
+                continue
             except Exception as e:
                 logger.warning(f"[{fetcher.name}] 获取指数行情失败: {e}")
                 continue

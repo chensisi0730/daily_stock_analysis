@@ -1128,16 +1128,18 @@ class TushareFetcher(BaseFetcher):
             ChipDistribution 对象（最新交易日的数据），获取失败返回 None
 
         """
+        # 筹码分布目前只有 A 股口径：美股/港股/ETF 不支持返回 None，
+        # 属于预期行为（数据源能力边界），用 debug 避免每只票都刷一条 WARNING
         if _is_us_code(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持美股 {stock_code} 的筹码分布")
+            logger.debug(f"[Tushare] TushareFetcher 不支持美股 {stock_code} 的筹码分布")
             return None
         
         if _is_etf_code(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持 ETF {stock_code} 的筹码分布")
+            logger.debug(f"[Tushare] TushareFetcher 不支持 ETF {stock_code} 的筹码分布")
             return None
 
         if _is_hk_market(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持港股 {stock_code} 的筹码分布")
+            logger.debug(f"[Tushare] TushareFetcher 不支持港股 {stock_code} 的筹码分布")
             return None
         
         try:

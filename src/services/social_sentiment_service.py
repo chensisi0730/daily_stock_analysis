@@ -95,7 +95,11 @@ class SocialSentimentService:
             resp = _get_with_retry(url, headers=self._headers, params=params)
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning("Social sentiment API %s returned %s", url, resp.status_code)
+            if resp.status_code == 404:
+                # 404 = 该标的在该数据源暂无舆情数据，属预期情况，不刷 WARNING
+                logger.debug("Social sentiment API %s 无该标的数据 (404)", url)
+            else:
+                logger.warning("Social sentiment API %s returned %s", url, resp.status_code)
         except _TRANSIENT_EXCEPTIONS as e:
             logger.warning("Social sentiment API %s network error: %s", url, e)
         except Exception as e:

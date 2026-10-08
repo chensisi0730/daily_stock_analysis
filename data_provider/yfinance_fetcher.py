@@ -16,6 +16,8 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 
 import csv
 import logging
+import threading
+import time
 from datetime import datetime
 from io import StringIO
 from typing import Optional, List, Dict, Any
@@ -31,7 +33,14 @@ from tenacity import (
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
+from .base import (
+    BaseFetcher,
+    DataFetchError,
+    STANDARD_COLUMNS,
+    YFINANCE_TICKER_TIMEOUT_SECONDS,
+    call_with_timeout,
+    is_bse_code,
+)
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 
@@ -64,6 +73,7 @@ class YfinanceFetcher(BaseFetcher):
     - 自动转换股票代码格式
     - 处理时区和数据格式差异
     - 失败后指数退避重试
+    - 全局请求间隔控制，避免触发限流
 
     注意事项：
     - A 股数据可能有延迟
@@ -74,9 +84,30 @@ class YfinanceFetcher(BaseFetcher):
     name = "YfinanceFetcher"
     priority = int(os.getenv("YFINANCE_PRIORITY", "4"))
 
+    # 全局请求间隔控制：确保任意两次 yfinance 请求之间至少间隔 N 秒
+    _last_request_time: float = 0.0
+    _min_request_interval: float = float(os.getenv("YFINANCE_MIN_INTERVAL", "3.0"))
+    _request_lock = threading.Lock()
+
     def __init__(self):
         """初始化 YfinanceFetcher"""
         pass
+
+    @classmethod
+    def _throttle_request(cls) -> None:
+        """全局请求间隔控制：确保任意两次 yfinance 请求之间至少间隔 N 秒。
+
+        通过类级别的时间戳 + 锁实现，所有实例共享同一间隔。
+        可通过 YFINANCE_MIN_INTERVAL 环境变量调整间隔（默认 3 秒）。
+        """
+        with cls._request_lock:
+            now = time.time()
+            elapsed_since_last = now - cls._last_request_time
+            if elapsed_since_last < cls._min_request_interval:
+                wait_sec = cls._min_request_interval - elapsed_since_last
+                logger.debug(f"[Yfinance] 全局请求间隔控制: 等待 {wait_sec:.1f}s")
+                time.sleep(wait_sec)
+            cls._last_request_time = time.time()
 
     def _convert_stock_code(self, stock_code: str) -> str:
         """
@@ -122,8 +153,8 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"转换港股代码: {stock_code} -> {hk_code}.HK")
             return f"{hk_code}.HK"
 
-        # 已经包含后缀的情况
-        if '.SS' in code or '.SZ' in code or '.HK' in code or '.BJ' in code:
+        # 已经包含后缀的情况（.KS 韩股, .TW 台股, .SI 新加坡, .TO 加拿大等）
+        if any(suffix in code for suffix in ('.SS', '.SZ', '.HK', '.BJ', '.KS', '.TW', '.SI', '.TO', '.AX', '.L')):
             return code
 
         # 去除可能的 .SH 后缀
@@ -152,7 +183,7 @@ class YfinanceFetcher(BaseFetcher):
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        wait=wait_exponential(multiplier=2, min=5, max=60),
         retry=retry_if_exception_type((ConnectionError, TimeoutError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
@@ -175,6 +206,12 @@ class YfinanceFetcher(BaseFetcher):
         logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
 
         try:
+            # 全局请求间隔控制
+            self._throttle_request()
+
+            # 请求前随机延迟，避免并发触发限流
+            BaseFetcher.random_sleep(min_seconds=0.5, max_seconds=2.0)
+
             # 使用 yfinance 下载数据
             df = yf.download(
                 tickers=yf_code,
@@ -193,6 +230,23 @@ class YfinanceFetcher(BaseFetcher):
                     df = df.loc[:, mask].copy()
 
             if df.empty:
+                # yfinance 限流时返回空 DataFrame 而不抛异常
+                # 检查 yfinance.shared._ERRORS 获取真实失败原因
+                try:
+                    import yfinance.shared as shared
+                    if hasattr(shared, '_ERRORS') and yf_code in shared._ERRORS:
+                        err_val = str(shared._ERRORS[yf_code])
+                        shared._ERRORS.pop(yf_code, None)  # 清理避免残留
+                        if ("Too Many Requests" in err_val
+                                or "Rate limit" in err_val
+                                or "YFRateLimitError" in err_val):
+                            logger.warning(f"[Yfinance] {stock_code} 限流导致空结果，将重试: {err_val}")
+                            raise ConnectionError(f"Yahoo Finance 限流: {err_val}")
+                except ConnectionError:
+                    raise  # 限流重试，向上抛出
+                except Exception:
+                    pass  # 检查失败不影响主流程
+
                 raise DataFetchError(f"Yahoo Finance 未查询到 {stock_code} 的数据")
 
             return df
@@ -200,6 +254,11 @@ class YfinanceFetcher(BaseFetcher):
         except Exception as e:
             if isinstance(e, DataFetchError):
                 raise
+            # yfinance 限流异常转为 ConnectionError 触发 retry
+            err_msg = str(e)
+            if "Too Many Requests" in err_msg or "Rate limit" in err_msg or "YFRateLimitError" in err_msg:
+                logger.warning(f"[Yfinance] {stock_code} 触发限流，将重试: {err_msg}")
+                raise ConnectionError(f"Yahoo Finance 限流: {err_msg}") from e
             raise DataFetchError(f"Yahoo Finance 获取数据失败: {e}") from e
 
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
@@ -274,10 +333,16 @@ class YfinanceFetcher(BaseFetcher):
         Returns:
             行情字典，失败时返回 None
         """
+        self._throttle_request()
         ticker = yf.Ticker(yf_code)
         # 取近两日数据以计算涨跌幅
-        hist = ticker.history(period='2d')
-        if hist.empty:
+        # yfinance 内部偶发长时间无响应（无严格超时），加墙钟保护，避免拖垮整条流水线
+        hist = call_with_timeout(
+            ticker.history,
+            timeout=YFINANCE_TICKER_TIMEOUT_SECONDS,
+            period='2d',
+        )
+        if hist is None or hist.empty:
             return None
         today_row = hist.iloc[-1]
         prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
@@ -586,6 +651,7 @@ class YfinanceFetcher(BaseFetcher):
 
         try:
             logger.debug(f"[Yfinance] 获取美股指数 {user_code} ({yf_symbol}) 实时行情")
+            self._throttle_request()
             ticker = yf.Ticker(yf_symbol)
 
             try:
@@ -683,6 +749,7 @@ class YfinanceFetcher(BaseFetcher):
             symbol = stock_code.strip().upper()
             logger.debug(f"[Yfinance] 获取美股 {symbol} 实时行情")
 
+            self._throttle_request()
             ticker = yf.Ticker(symbol)
 
             # 尝试获取 fast_info（更快，但字段较少）

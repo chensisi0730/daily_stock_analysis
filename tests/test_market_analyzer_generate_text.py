@@ -582,6 +582,7 @@ class TestMarketAnalyzerBypassFix:
         assert "今日美股市场整体呈现**小幅下跌**态势" in result
         assert "### 1. Market Summary" not in result
         assert "US Market Recap" not in result
+        assert "US Market Regime Strategy" not in result
 
     def test_inject_data_into_review_matches_english_headings(self):
         from src.market_analyzer import MarketOverview, MarketIndex

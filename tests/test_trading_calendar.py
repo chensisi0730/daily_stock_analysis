@@ -201,6 +201,36 @@ class ComputeEffectiveRegionTestCase(unittest.TestCase):
         result = trading_calendar.compute_effective_region("invalid", {"cn"})
         self.assertEqual(result, "cn")
 
+    def test_subset_hk_us_all_open_returns_comma_joined(self):
+        self.assertEqual(
+            trading_calendar.compute_effective_region("hk,us", {"cn", "hk", "us"}),
+            "hk,us",
+        )
+
+    def test_subset_hk_us_ignores_markets_not_requested(self):
+        self.assertEqual(
+            trading_calendar.compute_effective_region("hk,us", {"cn", "us"}),
+            "us",
+        )
+
+    def test_subset_hk_us_all_requested_closed_returns_empty(self):
+        self.assertEqual(trading_calendar.compute_effective_region("hk,us", {"cn"}), "")
+
+    def test_subset_order_normalized_to_market_order(self):
+        self.assertEqual(
+            trading_calendar.compute_effective_region("us,hk", {"cn", "hk", "us"}),
+            "hk,us",
+        )
+
+    def test_subset_with_spaces_is_tolerated(self):
+        self.assertEqual(trading_calendar.compute_effective_region("hk, us", {"hk", "us"}), "hk,us")
+
+    def test_subset_all_three_equivalent_to_both(self):
+        self.assertEqual(trading_calendar.compute_effective_region("cn,hk,us", {"us"}), "us")
+
+    def test_subset_unknown_token_falls_back_to_cn(self):
+        self.assertEqual(trading_calendar.compute_effective_region("xx,yy", {"cn"}), "cn")
+
 
 if __name__ == "__main__":
     unittest.main()

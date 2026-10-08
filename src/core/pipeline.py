@@ -37,6 +37,7 @@ from src.report_language import (
 )
 from src.search_service import SearchService
 from src.services.social_sentiment_service import SocialSentimentService
+from src.services.financial_media_sentiment_service import FinancialMediaSentimentService
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import (
@@ -153,6 +154,21 @@ class StockAnalysisPipeline:
                 exc_info=True,
             )
             self.social_sentiment_service = None
+
+        try:
+            self.financial_media_sentiment_service = FinancialMediaSentimentService(
+                search_service=self.search_service,
+                news_max_age_days=self.config.news_max_age_days,
+            )
+            if self.financial_media_sentiment_service.is_available:
+                logger.info("Financial media sentiment service enabled (Zerohedge/Bloomberg/Reuters/Reddit, all markets)")
+        except Exception as exc:
+            logger.warning(
+                "财经媒体舆情服务初始化失败，将跳过媒体情绪分析: %s",
+                exc,
+                exc_info=True,
+            )
+            self.financial_media_sentiment_service = None
 
     def _emit_progress(self, progress: int, message: str) -> None:
         """Best-effort bridge from pipeline stages to task SSE progress."""
@@ -427,6 +443,19 @@ class StockAnalysisPipeline:
                             news_context = social_context
                 except Exception as e:
                     logger.warning(f"{stock_name}({code}) Social sentiment fetch failed: {e}")
+
+            if self.financial_media_sentiment_service is not None and self.financial_media_sentiment_service.is_available:
+                try:
+                    fm_sentiment = self.financial_media_sentiment_service.get_sentiment(code)
+                    if fm_sentiment:
+                        fm_context = self.financial_media_sentiment_service.format_for_prompt(fm_sentiment)
+                        logger.info(f"{stock_name}({code}) Financial media sentiment: score={fm_sentiment.sentiment_score:+.1f}, heat={fm_sentiment.discussion_heat}")
+                        if news_context:
+                            news_context = news_context + "\n\n" + fm_context
+                        else:
+                            news_context = fm_context
+                except Exception as e:
+                    logger.warning(f"{stock_name}({code}) Financial media sentiment fetch failed: {e}")
 
             # Step 5: 获取分析上下文（技术面数据）
             self._emit_progress(58, f"{stock_name}：正在整理分析上下文")
@@ -810,6 +839,20 @@ class StockAnalysisPipeline:
                         logger.info(f"[{code}] Agent mode: social sentiment data injected into news_context")
                 except Exception as e:
                     logger.warning(f"[{code}] Agent mode: social sentiment fetch failed: {e}")
+
+            if self.financial_media_sentiment_service is not None and self.financial_media_sentiment_service.is_available:
+                try:
+                    fm_sentiment = self.financial_media_sentiment_service.get_sentiment(code)
+                    if fm_sentiment:
+                        fm_context = self.financial_media_sentiment_service.format_for_prompt(fm_sentiment)
+                        existing = initial_context.get("news_context")
+                        if existing:
+                            initial_context["news_context"] = existing + "\n\n" + fm_context
+                        else:
+                            initial_context["news_context"] = fm_context
+                        logger.info(f"[{code}] Agent mode: financial media sentiment injected (score={fm_sentiment.sentiment_score:+.1f}, heat={fm_sentiment.discussion_heat})")
+                except Exception as e:
+                    logger.warning(f"[{code}] Agent mode: financial media sentiment fetch failed: {e}")
 
             # Issue #1066: ensure deep history is in DB before agent tools run
             self._ensure_agent_history(code)

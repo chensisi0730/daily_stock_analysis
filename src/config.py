@@ -1171,12 +1171,27 @@ class Config:
                 "please migrate to deepseek-v4-flash."
             )
 
-        # Auto-infer LITELLM_MODEL from channels when not explicitly set
-        if not litellm_model and llm_channels:
+        # Auto-infer LITELLM_MODEL from channels when not explicitly set.
+        # LLM_CHANNELS 生效时优先于 legacy 单 key 推断：否则未显式配置 LITELLM_MODEL 的场景
+        # 会先被推断成 deepseek-chat 等 legacy 模型，与 Router 实际注册的模型不一致，
+        # 导致每次调用先打一个不可用的主模型再降级。
+        _explicit_litellm_model = bool(os.getenv('LITELLM_MODEL', '').strip())
+        if not _explicit_litellm_model and llm_channels:
             for _ch in llm_channels:
                 if _ch.get('models'):
                     litellm_model = _ch['models'][0]
                     break
+
+        # 显式指定的主模型若不在已注册模型列表内，每次调用都会先失败再降级，提前告警
+        if _explicit_litellm_model and llm_model_list:
+            _registered_models = get_configured_llm_models(llm_model_list)
+            if _registered_models and litellm_model not in _registered_models:
+                logger.warning(
+                    "LITELLM_MODEL=%s 不在已注册模型列表 %s 内，"
+                    "每次调用会先尝试该模型失败后再降级，请改为列表中的模型名或留空自动推断",
+                    litellm_model,
+                    sorted(_registered_models),
+                )
 
         # Auto-infer LITELLM_FALLBACK_MODELS from channels when not explicitly set
         if not litellm_fallback_models and llm_channels and litellm_model:
@@ -2022,13 +2037,18 @@ class Config:
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
-        """解析大盘复盘市场区域，非法值记录警告后回退为 cn"""
+        """解析大盘复盘市场区域：支持单一值或逗号子集，非法值记录警告后回退为 cn"""
         import logging
+        singles = ('cn', 'hk', 'us')
         v = (value or 'cn').strip().lower()
-        if v in ('cn', 'us', 'hk', 'both'):
+        if v in singles or v == 'both':
             return v
+        parts = [p.strip() for p in v.split(',') if p.strip()]
+        if parts and all(p in singles for p in parts):
+            return ','.join(m for m in singles if m in set(parts))
         logging.getLogger(__name__).warning(
-            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'（合法值：cn / hk / us / both）"
+            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'"
+            f"（合法值：cn / hk / us / both，或逗号组合如 cn,hk / hk,us / cn,us）"
         )
         return 'cn'
 

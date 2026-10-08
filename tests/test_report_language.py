@@ -4,7 +4,9 @@
 import unittest
 
 from src.report_language import (
+    format_currency_amount,
     get_bias_status_emoji,
+    get_currency_unit,
     get_localized_stock_name,
     get_sentiment_label,
     get_signal_level,
@@ -44,6 +46,27 @@ class ReportLanguageTestCase(unittest.TestCase):
         self.assertEqual(localize_bias_status("警戒", "en"), "Caution")
         self.assertEqual(get_bias_status_emoji("Safe"), "✅")
         self.assertEqual(get_bias_status_emoji("Caution"), "⚠️")
+
+    def test_currency_unit_follows_market(self) -> None:
+        self.assertEqual(get_currency_unit("cn", "zh"), "元")
+        self.assertEqual(get_currency_unit("hk", "zh"), "港元")
+        self.assertEqual(get_currency_unit("us", "zh"), "美元")
+        self.assertEqual(get_currency_unit("us", "en"), "USD")
+        # 未知市场/语言按 A 股兜底，保持历史输出不变
+        self.assertEqual(get_currency_unit(None, "zh"), "元")
+        self.assertEqual(get_currency_unit("jp", "zh"), "元")
+
+    def test_format_currency_amount_uses_market_currency(self) -> None:
+        self.assertEqual(format_currency_amount(3.1563e10, "us", "zh"), "315.63 亿美元")
+        self.assertEqual(format_currency_amount(3.1563e10, "cn", "zh"), "315.63 亿元")
+        self.assertEqual(format_currency_amount(3.1563e10, "hk", "zh"), "315.63 亿港元")
+        self.assertEqual(format_currency_amount(5.6e4, "us", "zh"), "5.60 万美元")
+        self.assertEqual(format_currency_amount(230, "us", "zh"), "230 美元")
+        self.assertEqual(format_currency_amount(3.1563e10, "us", "en"), "31.56B USD")
+
+    def test_format_currency_amount_handles_missing_values(self) -> None:
+        self.assertEqual(format_currency_amount(None, "us", "zh"), "N/A")
+        self.assertEqual(format_currency_amount("bad", "cn", "zh"), "N/A")
 
 
 if __name__ == "__main__":
